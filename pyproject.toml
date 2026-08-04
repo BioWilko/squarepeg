@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "squarepeg"
+version = "0.1.0"
+description = "Run a docker-run-style command as a Kubernetes Pod or Job, streaming its output like a local process"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "click>=8.1",
+    "kubernetes>=31",
+    "PyYAML>=6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-cov>=5",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+squarepeg = "squarepeg.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["squarepeg*"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires a reachable kubernetes cluster (opt in with SQUAREPEG_INTEGRATION=1)",
+]
+addopts = "-m 'not integration'"
