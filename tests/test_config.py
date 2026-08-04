@@ -206,3 +206,110 @@ def test_nested_profiles_key_inside_profile_rejected(tmp_path, monkeypatch):
     bad = write(tmp_path / "bad.yaml", "profiles:\n  gpu:\n    profiles:\n      nested: {}\n")
     with pytest.raises(ConfigError, match="nested"):
         config.load_effective_config((str(bad),))
+
+
+# --- ${VAR} interpolation, through the full loader ---
+
+
+def test_top_level_string_value_interpolated(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.setenv("SQUAREPEG_TEST_NS", "from-env")
+    doc = write(tmp_path / "doc.yaml", "namespace: ${SQUAREPEG_TEST_NS}\n")
+    effective, _ = config.load_effective_config((str(doc),))
+    assert effective["namespace"] == "from-env"
+
+
+def test_interpolation_inside_kubernetes_passthrough(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.setenv("SQUAREPEG_TEST_SECRET", "regcred")
+    doc = write(
+        tmp_path / "doc.yaml",
+        "kubernetes:\n  spec:\n    imagePullSecrets:\n      - {name: \"${SQUAREPEG_TEST_SECRET}\"}\n",
+    )
+    effective, _ = config.load_effective_config((str(doc),))
+    assert effective["kubernetes"]["spec"]["imagePullSecrets"] == [{"name": "regcred"}]
+
+
+def test_missing_var_error_names_file_and_variable(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.delenv("SQUAREPEG_TEST_UNSET_CONFIG_VAR", raising=False)
+    bad = write(tmp_path / "bad.yaml", "namespace: ${SQUAREPEG_TEST_UNSET_CONFIG_VAR}\n")
+    with pytest.raises(ConfigError) as exc_info:
+        config.load_effective_config((str(bad),))
+    message = str(exc_info.value)
+    assert "SQUAREPEG_TEST_UNSET_CONFIG_VAR" in message
+    assert str(bad) in message
+
+
+def test_two_layered_files_each_using_a_different_var(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.setenv("SQUAREPEG_TEST_A", "a-value")
+    monkeypatch.setenv("SQUAREPEG_TEST_B", "b-value")
+    a = write(tmp_path / "a.yaml", "namespace: ${SQUAREPEG_TEST_A}\n")
+    b = write(tmp_path / "b.yaml", "defaults: {workdir: \"${SQUAREPEG_TEST_B}\"}\n")
+    effective, _ = config.load_effective_config((str(a), str(b)))
+    assert effective["namespace"] == "a-value"
+    assert effective["defaults"]["workdir"] == "b-value"
+
+
+def test_later_file_resolved_value_wins_over_earlier(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.setenv("SQUAREPEG_TEST_A", "from-a")
+    monkeypatch.setenv("SQUAREPEG_TEST_B", "from-b")
+    a = write(tmp_path / "a.yaml", "namespace: ${SQUAREPEG_TEST_A}\n")
+    b = write(tmp_path / "b.yaml", "namespace: ${SQUAREPEG_TEST_B}\n")
+    effective, _ = config.load_effective_config((str(a), str(b)))
+    assert effective["namespace"] == "from-b"
+
+
+def test_timeout_string_from_interpolation_coerces_to_int(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    doc = write(tmp_path / "doc.yaml", "timeout: ${SQUAREPEG_TEST_TIMEOUT:-300}\n")
+    effective, _ = config.load_effective_config((str(doc),))
+    assert config.coerce_int(effective["timeout"], "timeout") == 300
+
+
+def test_cleanup_false_string_from_interpolation_coerces_to_bool(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.setenv("SQUAREPEG_TEST_CLEANUP", "false")
+    doc = write(tmp_path / "doc.yaml", "cleanup: ${SQUAREPEG_TEST_CLEANUP}\n")
+    effective, _ = config.load_effective_config((str(doc),))
+    assert config.coerce_bool(effective["cleanup"], "cleanup") is False
+
+
+def test_coerce_bool_rejects_garbage():
+    with pytest.raises(ConfigError, match="cleanup"):
+        config.coerce_bool("maybe", "cleanup")
+
+
+def test_coerce_int_rejects_garbage():
+    with pytest.raises(ConfigError, match="timeout"):
+        config.coerce_int("soon", "timeout")
+
+
+def test_reference_in_unselected_profile_still_errors(tmp_path, monkeypatch):
+    """Interpolation is eager over the whole document -- matches validate_document,
+    which already validates every profile regardless of selection."""
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.delenv("SQUAREPEG_TEST_UNSET_PROFILE_VAR", raising=False)
+    doc = write(
+        tmp_path / "doc.yaml",
+        "profiles:\n  gpu:\n    namespace: ${SQUAREPEG_TEST_UNSET_PROFILE_VAR}\n",
+    )
+    with pytest.raises(ConfigError, match="SQUAREPEG_TEST_UNSET_PROFILE_VAR"):
+        config.load_effective_config((str(doc),))
+
+
+def test_unknown_key_still_rejected_when_value_has_a_reference(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.setenv("SQUAREPEG_TEST_TYPO_VALUE", "whatever")
+    bad = write(tmp_path / "bad.yaml", "namesapce: ${SQUAREPEG_TEST_TYPO_VALUE}\n")
+    with pytest.raises(ConfigError, match="namesapce"):
+        config.load_effective_config((str(bad),))
+
+
+def test_config_without_dollar_signs_behaves_identically(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    doc = write(tmp_path / "doc.yaml", "namespace: plain-ns\ndefaults: {cpus: '2'}\n")
+    effective, _ = config.load_effective_config((str(doc),))
+    assert effective == {"namespace": "plain-ns", "defaults": {"cpus": "2"}}

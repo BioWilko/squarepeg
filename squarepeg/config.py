@@ -17,6 +17,7 @@ from pathlib import Path
 
 import yaml
 
+from squarepeg.env_interpolation import interpolate_document
 from squarepeg.errors import ConfigError
 from squarepeg.merge import deep_merge
 
@@ -117,10 +118,43 @@ def load_effective_config(
     sources = resolve_config_sources(cli_config_paths, no_default_config=no_default_config)
     effective: dict = {}
     for path, origin in sources:
+        source = f"{path} ({origin})"
         doc = load_yaml_document(path)
-        validate_document(doc, f"{path} ({origin})")
+        doc = interpolate_document(doc, source)
+        validate_document(doc, source)
         effective = deep_merge(effective, doc)
     return effective, sources
+
+
+_TRUE_STRINGS = {"true", "1", "yes", "on"}
+_FALSE_STRINGS = {"false", "0", "no", "off"}
+
+
+def coerce_int(value, key: str) -> int:
+    """Coerce a config value to int, accepting an int-looking string (e.g. from ${VAR} interpolation)."""
+    if isinstance(value, bool):  # bool is an int subclass; reject it explicitly
+        raise ConfigError(f"expected an integer for {key!r}, got {value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            pass
+    raise ConfigError(f"expected an integer for {key!r}, got {value!r}")
+
+
+def coerce_bool(value, key: str) -> bool:
+    """Coerce a config value to bool, accepting a bool-looking string (e.g. from ${VAR} interpolation)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in _TRUE_STRINGS:
+            return True
+        if lowered in _FALSE_STRINGS:
+            return False
+    raise ConfigError(f"expected a boolean for {key!r}, got {value!r}")
 
 
 def select_profile(effective_config: dict, profile_name: str | None) -> dict:

@@ -24,3 +24,17 @@ def test_run_missing_image_errors():
 def test_config_show_no_sources():
     result = CliRunner().invoke(cli, ["config", "show", "--no-default-config"])
     assert result.exit_code == 0
+
+
+def test_run_dry_run_resolves_env_var_reference_in_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("SQUAREPEG_TEST_CLI_SECRET", "regcred")
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        'kubernetes:\n  spec:\n    imagePullSecrets:\n      - {name: "${SQUAREPEG_TEST_CLI_SECRET}"}\n'
+    )
+    result = CliRunner().invoke(
+        cli, ["run", "--no-default-config", "--config", str(config_file), "--dry-run", "alpine"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "name: regcred" in result.output
+    assert "${" not in result.output

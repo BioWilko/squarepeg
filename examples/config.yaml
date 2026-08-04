@@ -9,9 +9,16 @@
 #
 # Every section below is optional; a real config only needs the parts you
 # want to set. See README.md for the full precedence/layering explanation.
+#
+# Any string value anywhere below can reference an environment variable:
+#   ${VAR}            -- substitutes $VAR; error if unset
+#   ${VAR:-default}   -- substitutes $VAR if set and non-empty, else 'default'
+# See the "Environment variable references" section of README.md for the
+# full semantics (including the bash-compatible empty-string-counts-as-unset
+# behaviour of ':-', and why config show/--dry-run may print secrets).
 
 # ── tool-level settings ────────────────────────────────────────────────
-namespace: my-namespace
+namespace: "${SQUAREPEG_NAMESPACE:-my-namespace}"
 mode: pod                    # pod | job
 cleanup: true                # false behaves as if --keep were always passed
 timeout: 300                 # seconds to wait for the container to start
@@ -33,7 +40,7 @@ volumes:
   scratch:
     emptyDir: {sizeLimit: 10Gi}
   refdata:
-    persistentVolumeClaim: {claimName: refdata-pvc, readOnly: true}
+    persistentVolumeClaim: {claimName: "${REFDATA_PVC}", readOnly: true}
 
 # arbitrary k8s passthrough, merged into the generated manifest.
 # `spec` here is ALWAYS a pod spec, even in --mode job -- squarepeg re-homes
@@ -43,12 +50,12 @@ kubernetes:
     labels: {team: bioinf}
     annotations: {"example.org/cost-centre": "abc"}
   spec:
-    serviceAccountName: squarepeg
+    serviceAccountName: "${SERVICE_ACCOUNT:-squarepeg}"
     nodeSelector: {"kubernetes.io/arch": amd64}
     tolerations:
       - {key: dedicated, operator: Equal, value: batch, effect: NoSchedule}
     imagePullSecrets:
-      - {name: regcred}
+      - {name: "${REGISTRY_SECRET:-regcred}"}
     securityContext: {runAsNonRoot: true, fsGroup: 1000}
     containers:
       - name: main            # matched by name; merges into squarepeg's container

@@ -2,7 +2,7 @@ import click
 import yaml
 
 from squarepeg import __version__
-from squarepeg.config import load_effective_config, select_profile
+from squarepeg.config import coerce_bool, coerce_int, load_effective_config, select_profile
 from squarepeg.dockerargs import check_supported_image, parse_env_entries, reject_unsupported
 from squarepeg.errors import SquarepegError, UsageError
 from squarepeg.k8s.runner import run_manifest
@@ -154,7 +154,7 @@ def run(
     resolved_config, _sources = _resolve_config(config_paths, no_default_config, profile)
     config_defaults = resolved_config.get("defaults") or {}
     config_volumes = resolved_config.get("volumes") or {}
-    allow_host_path_mounts = bool(resolved_config.get("allow_host_path_mounts", False))
+    allow_host_path_mounts = coerce_bool(resolved_config.get("allow_host_path_mounts", False), "allow_host_path_mounts")
 
     claims: set[str] = set()
 
@@ -228,9 +228,9 @@ def run(
         workdir = config_defaults["workdir"]
 
     mode = mode or resolved_config.get("mode", "pod")
-    timeout = timeout if timeout is not None else resolved_config.get("timeout", 300)
-    quiet = quiet or bool(resolved_config.get("quiet", False))
-    cleanup = False if keep else bool(resolved_config.get("cleanup", True))
+    timeout = timeout if timeout is not None else coerce_int(resolved_config.get("timeout", 300), "timeout")
+    quiet = quiet or coerce_bool(resolved_config.get("quiet", False), "quiet")
+    cleanup = False if keep else coerce_bool(resolved_config.get("cleanup", True), "cleanup")
 
     entrypoint_tuple = (entrypoint,) if entrypoint is not None else None
     if entrypoint_tuple is not None:

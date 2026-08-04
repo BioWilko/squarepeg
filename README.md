@@ -19,8 +19,8 @@ Common flags: `-e/--env`, `-v/--volume`, `--name`, `-w/--workdir`,
 squarepeg config show [--config PATH]... [--no-default-config] [--profile NAME]
 ```
 
-Prints the merged effective config (stdout) and the files it came from, in
-order (stderr).
+Prints the merged, **resolved** (post-`${VAR}` interpolation) effective
+config (stdout) and the files it came from, in order (stderr).
 
 ## Config
 
@@ -47,6 +47,45 @@ generated manifest) and are not validated by squarepeg itself — use
 `--dry-run` to inspect the result. `kubernetes.spec` is always a **pod**
 spec, even in `--mode job`; squarepeg re-homes it under the Job's pod
 template so the same config works in either mode.
+
+### Environment variable references
+
+Any string value anywhere in a config file — including inside the
+unvalidated `kubernetes`/`job` passthrough sections — can reference an
+environment variable:
+
+- `${VAR}` — substitutes `$VAR`; a hard error naming the file and the
+  variable if it's not set.
+- `${VAR:-default}` — substitutes `$VAR` if it is set **and non-empty**,
+  else the literal `default`. This is bash's `:-` operator: a variable set
+  to the empty string counts as unset, which is easy to forget.
+- `$$` — a literal `$`. Bare `$VAR` (no braces) is not a reference and is
+  left untouched.
+
+A default is always a literal — it is never itself re-scanned for further
+references, and a value that happens to *contain* `${...}` text is never
+re-expanded.
+
+Substitution is **eager**: every file is resolved in full as soon as it's
+loaded, including profile bodies you didn't select with `--profile`. This
+matches how squarepeg already validates every profile regardless of
+selection — a typo in an unused profile is a hard error either way.
+
+Substitution always produces a string. That's fine for squarepeg's own
+string-typed settings (`namespace`, `defaults.cpus`, etc. — `timeout`,
+`quiet`, `cleanup` and `allow_host_path_mounts` are explicitly coerced from
+a string if needed), but an integer/boolean field inside the `kubernetes`/
+`job` passthrough (e.g. `backoffLimit`, `readOnly`) must not be interpolated
+into a quoted string — the apiserver will reject it, and the error will be
+visible immediately via `--dry-run`.
+
+Because `squarepeg config show` and `--dry-run` print **resolved** values,
+anything pulled from a secret-bearing environment variable will appear in
+their output — treat that output the same way you'd treat a shell history
+containing secrets. squarepeg does not redact anything; for real secrets,
+prefer referencing a Kubernetes Secret directly in `kubernetes.spec` (e.g.
+via `envFrom`/`secretKeyRef`), which never passes through squarepeg's own
+process at all.
 
 ## Divergences from `docker run`
 
