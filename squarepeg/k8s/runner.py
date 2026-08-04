@@ -229,8 +229,15 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
             if phase == "Running":
                 wait_for_terminal(session, pod_name, handler.stop_event)
 
-            handler.stop_event.set()
-            log_thread.join(timeout=5)
+            # let the log stream reach its own natural EOF (the kubelet closes it once the
+            # container is terminal); only force it to stop if it's genuinely stuck, since
+            # setting stop_event unconditionally here would race a just-started thread and
+            # truncate output for fast-exiting containers.
+            log_thread.join(timeout=30)
+            if log_thread.is_alive():
+                chatter(f"log stream for pod {pod_name!r} did not finish on its own; stopping it", quiet=spec.quiet)
+                handler.stop_event.set()
+                log_thread.join(timeout=5)
 
             if handler.interrupted:
                 raise InterruptError(f"interrupted while running {spec.mode} {name!r}")
