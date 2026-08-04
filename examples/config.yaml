@@ -1,0 +1,72 @@
+# Example squarepeg config file.
+#
+# Copy to one of the locations squarepeg resolves config from (highest to
+# lowest precedence):
+#   1. --config PATH (repeatable, layered left-to-right)
+#   2. $SQUAREPEG_CONFIG (colon-separated list of paths, left-to-right)
+#   3. ~/.config/squarepeg/config.yaml (the single default location)
+# Individual CLI flags always win over all of these.
+#
+# Every section below is optional; a real config only needs the parts you
+# want to set. See README.md for the full precedence/layering explanation.
+
+# ── tool-level settings ────────────────────────────────────────────────
+namespace: my-namespace
+mode: pod                    # pod | job
+cleanup: true                # false behaves as if --keep were always passed
+timeout: 300                 # seconds to wait for the container to start
+quiet: false
+allow_host_path_mounts: false
+split_streams: false
+
+# applied unless the equivalent CLI flag is given
+defaults:
+  cpus: "1"
+  memory: 2g                 # docker units here, same as --memory
+  image_pull_policy: IfNotPresent
+  workdir: /work
+  env:
+    TZ: Europe/London
+
+# named volumes, referenced as  -v NAME:/mount/path
+volumes:
+  scratch:
+    emptyDir: {sizeLimit: 10Gi}
+  refdata:
+    persistentVolumeClaim: {claimName: refdata-pvc, readOnly: true}
+
+# arbitrary k8s passthrough, merged into the generated manifest.
+# `spec` here is ALWAYS a pod spec, even in --mode job -- squarepeg re-homes
+# it under the Job's pod template, so the same config works in either mode.
+kubernetes:
+  metadata:
+    labels: {team: bioinf}
+    annotations: {"example.org/cost-centre": "abc"}
+  spec:
+    serviceAccountName: squarepeg
+    nodeSelector: {"kubernetes.io/arch": amd64}
+    tolerations:
+      - {key: dedicated, operator: Equal, value: batch, effect: NoSchedule}
+    imagePullSecrets:
+      - {name: regcred}
+    securityContext: {runAsNonRoot: true, fsGroup: 1000}
+    containers:
+      - name: main            # matched by name; merges into squarepeg's container
+        securityContext: {allowPrivilegeEscalation: false}
+
+# Job-level settings only; ignored in --mode pod
+job:
+  spec:
+    backoffLimit: 0
+    ttlSecondsAfterFinished: 3600
+
+# selected with --profile NAME; deep-merges over the rest of this config
+profiles:
+  gpu:
+    defaults: {cpus: "8", memory: 32g}
+    kubernetes:
+      spec:
+        nodeSelector: {"nvidia.com/gpu.present": "true"}
+        containers:
+          - name: main
+            resources: {limits: {"nvidia.com/gpu": 1}}

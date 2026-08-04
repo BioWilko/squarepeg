@@ -36,14 +36,16 @@ Every layer is deep-merged key by key (not replaced wholesale), so a later
 layer can override just one setting without restating everything else. Use
 `--no-default-config` for a hermetic, reproducible resolution.
 
-See the schema and an example in [`squarepeg/config.py`](squarepeg/config.py)
-(`ALLOWED_TOP_KEYS`, `ALLOWED_DEFAULTS_KEYS`) — top-level keys are
-`namespace`, `mode`, `cleanup`, `timeout`, `quiet`, `allow_host_path_mounts`,
-`split_streams`, `defaults`, `volumes`, `kubernetes`, `job`, `profiles`. The
-`kubernetes` and `job` sections accept arbitrary Kubernetes fields verbatim
-(deep-merged into the generated manifest) and are not validated by squarepeg
-itself — use `--dry-run` to inspect the result. `kubernetes.spec` is always a
-**pod** spec, even in `--mode job`; squarepeg re-homes it under the Job's pod
+See [`examples/config.yaml`](examples/config.yaml) for a fully worked example
+covering every section, or the schema itself in
+[`squarepeg/config.py`](squarepeg/config.py) (`ALLOWED_TOP_KEYS`,
+`ALLOWED_DEFAULTS_KEYS`) — top-level keys are `namespace`, `mode`, `cleanup`,
+`timeout`, `quiet`, `allow_host_path_mounts`, `split_streams`, `defaults`,
+`volumes`, `kubernetes`, `job`, `profiles`. The `kubernetes` and `job`
+sections accept arbitrary Kubernetes fields verbatim (deep-merged into the
+generated manifest) and are not validated by squarepeg itself — use
+`--dry-run` to inspect the result. `kubernetes.spec` is always a **pod**
+spec, even in `--mode job`; squarepeg re-homes it under the Job's pod
 template so the same config works in either mode.
 
 ## Divergences from `docker run`
