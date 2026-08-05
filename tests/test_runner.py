@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import threading
@@ -79,6 +80,32 @@ def test_create_resource_wraps_api_exception():
     session.core.create_namespaced_pod.side_effect = ApiException(status=409, reason="Conflict")
     with pytest.raises(ApiError, match="Conflict"):
         runner.create_resource(session, basic_spec(mode="pod"), {"metadata": {"name": "p"}})
+
+
+def test_api_exception_surfaces_status_message_from_body():
+    """A 400/422 from the apiserver carries a specific field-level message in its response
+    body (e.g. 'spec.nodeSelector: Invalid value: ...') that's far more useful than the bare
+    HTTP reason phrase ('Bad Request') -- must not be discarded."""
+    body = json.dumps({"kind": "Status", "message": "Pod \"p\" is invalid: spec.nodeSelector: Invalid value"})
+    exc = ApiException(status=400, reason="Bad Request")
+    exc.body = body
+    wrapped = runner._wrap_api_exception(exc, "failed to create pod 'p'")
+    assert "spec.nodeSelector" in str(wrapped)
+    assert "run with --dry-run" in str(wrapped)
+
+
+def test_api_exception_falls_back_to_reason_when_body_has_no_message():
+    exc = ApiException(status=400, reason="Bad Request")
+    exc.body = "not json"
+    wrapped = runner._wrap_api_exception(exc, "failed to create pod 'p'")
+    assert "Bad Request" in str(wrapped)
+
+
+def test_api_exception_falls_back_to_reason_when_body_is_empty():
+    exc = ApiException(status=409, reason="Conflict")
+    exc.body = None
+    wrapped = runner._wrap_api_exception(exc, "failed to create pod 'p'")
+    assert "Conflict" in str(wrapped)
 
 
 # --- discover_job_pod ---

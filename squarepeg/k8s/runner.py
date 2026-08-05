@@ -2,6 +2,7 @@
 extract its exit code, and clean up.
 """
 
+import json
 import signal
 import threading
 
@@ -25,6 +26,7 @@ FAIL_FAST_REASONS = {
 }
 
 _API_ERROR_HINTS = {
+    400: "the apiserver rejected the manifest as malformed; run with --dry-run to inspect it",
     401: "authentication failed; try 'kubectl get pods' to check your credentials",
     403: "permission denied; check with 'kubectl auth can-i create pods'",
     404: "not found; check the namespace exists",
@@ -37,9 +39,23 @@ _API_ERROR_HINTS = {
 TERMINAL_WATCH_POLL_SECONDS = 3600
 
 
+def _api_exception_detail(exc: ApiException) -> str:
+    """Extract the Kubernetes Status object's 'message' field from the response body, if
+    present -- this is almost always far more specific than exc.reason (the bare HTTP
+    reason phrase, e.g. 'Bad Request'), naming the exact field the apiserver rejected."""
+    if exc.body:
+        try:
+            body = json.loads(exc.body)
+        except (TypeError, ValueError):
+            body = None
+        if isinstance(body, dict) and body.get("message"):
+            return body["message"]
+    return exc.reason
+
+
 def _wrap_api_exception(exc: ApiException, action: str) -> ApiError:
     hint = _API_ERROR_HINTS.get(exc.status)
-    message = f"{action}: {exc.reason}"
+    message = f"{action}: {_api_exception_detail(exc)}"
     if hint:
         message += f" ({hint})"
     return ApiError(message)
