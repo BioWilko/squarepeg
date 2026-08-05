@@ -108,6 +108,36 @@ def test_api_exception_falls_back_to_reason_when_body_is_empty():
     assert "Conflict" in str(wrapped)
 
 
+def test_resource_quota_403_gets_a_specific_hint_not_the_rbac_one():
+    """A ResourceQuota admission rejection arrives as a 403 too, but it has nothing to do
+    with RBAC -- the generic 'check with kubectl auth can-i' hint would be actively
+    misleading here, so it must be replaced with quota-specific guidance."""
+    body = json.dumps(
+        {
+            "kind": "Status",
+            "message": (
+                'pods "squarepeg-alpine-163c34" is forbidden: failed quota: quota: must '
+                "specify requests.cpu for: main; requests.memory for: main"
+            ),
+        }
+    )
+    exc = ApiException(status=403, reason="Forbidden")
+    exc.body = body
+    wrapped = runner._wrap_api_exception(exc, "failed to create pod 'squarepeg-alpine-163c34'")
+    message = str(wrapped)
+    assert "requests.cpu" in message
+    assert "ResourceQuota" in message
+    assert "--cpus" in message
+    assert "kubectl auth can-i" not in message
+
+
+def test_other_403s_still_get_the_generic_rbac_hint():
+    exc = ApiException(status=403, reason="Forbidden")
+    exc.body = json.dumps({"kind": "Status", "message": "pods is forbidden: User cannot create resource"})
+    wrapped = runner._wrap_api_exception(exc, "failed to create pod 'p'")
+    assert "kubectl auth can-i" in str(wrapped)
+
+
 # --- discover_job_pod ---
 
 

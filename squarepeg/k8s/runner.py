@@ -34,6 +34,18 @@ _API_ERROR_HINTS = {
     422: "the apiserver rejected the manifest; run with --dry-run to inspect it",
 }
 
+# A ResourceQuota admission rejection also arrives as HTTP 403, but it has nothing to do with
+# RBAC permissions -- the generic 403 hint above ("check with kubectl auth can-i") is actively
+# misleading here. Detected by the admission plugin's standard "failed quota: ..." message
+# text, which names the missing requests/limits per container.
+_QUOTA_ERROR_MARKER = "failed quota"
+_QUOTA_HINT = (
+    "the target namespace enforces a ResourceQuota requiring cpu/memory requests (and "
+    "possibly limits) on every container; set --cpus/--memory (or --request-cpu/--request-"
+    "memory/--limit-cpu/--limit-memory), or 'defaults.cpus'/'defaults.memory' in config so "
+    "you don't have to pass them on every run"
+)
+
 # how long a single watch call may block waiting for the pod to become terminal,
 # once it has already started; the loop simply re-watches if this elapses.
 TERMINAL_WATCH_POLL_SECONDS = 3600
@@ -54,8 +66,12 @@ def _api_exception_detail(exc: ApiException) -> str:
 
 
 def _wrap_api_exception(exc: ApiException, action: str) -> ApiError:
-    hint = _API_ERROR_HINTS.get(exc.status)
-    message = f"{action}: {_api_exception_detail(exc)}"
+    detail = _api_exception_detail(exc)
+    if exc.status == 403 and _QUOTA_ERROR_MARKER in detail.lower():
+        hint = _QUOTA_HINT
+    else:
+        hint = _API_ERROR_HINTS.get(exc.status)
+    message = f"{action}: {detail}"
     if hint:
         message += f" ({hint})"
     return ApiError(message)
