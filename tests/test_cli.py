@@ -92,3 +92,41 @@ def test_run_dry_run_existing_config_without_mount_path_unaffected(tmp_path):
     assert result.exit_code == 0, result.output
     assert "volumes:" not in result.output
     assert "refdata" not in result.output
+
+
+def test_run_dry_run_auto_mount_with_no_source_falls_back_to_empty_dir(tmp_path):
+    """Regression: mount_path with no k8s volume source (persistentVolumeClaim/emptyDir/etc.)
+    must still produce a valid manifest, falling back to emptyDir rather than a typeless volume."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("volumes:\n  scratch:\n    mount_path: /scratch\n")
+    result = CliRunner().invoke(
+        cli, ["run", "--no-default-config", "--config", str(config_file), "--dry-run", "alpine"]
+    )
+    assert result.exit_code == 0, result.output
+    manifest = yaml.safe_load(result.output)
+    assert manifest["spec"]["volumes"] == [{"name": "scratch", "emptyDir": {}}]
+
+
+def test_run_dry_run_ambiguous_passthrough_volume_mounts_raises_clear_error(tmp_path):
+    """Regression: config passthrough that redeclares volumeMounts for a container whose
+    mounts already have a duplicate name (auto-mount + -v at another path) must raise a
+    clear error rather than silently dropping one of the mounts."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "volumes:\n"
+        "  scratch:\n"
+        "    emptyDir: {}\n"
+        "    mount_path: /scratch\n"
+        "kubernetes:\n"
+        "  spec:\n"
+        "    containers:\n"
+        "      - name: main\n"
+        "        volumeMounts:\n"
+        "          - {name: scratch, mountPath: /conflict}\n"
+    )
+    result = CliRunner().invoke(
+        cli,
+        ["run", "--no-default-config", "--config", str(config_file), "-v", "scratch:/elsewhere", "--dry-run", "alpine"],
+    )
+    assert result.exit_code != 0
+    assert "scratch" in str(result.exception)

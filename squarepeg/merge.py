@@ -15,14 +15,41 @@ also required so a later layer can remove an inherited entry (e.g.
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from squarepeg.errors import ConfigError
+
 
 def _is_named_list(value: Any) -> bool:
     return isinstance(value, list) and all(isinstance(item, Mapping) and "name" in item for item in value)
 
 
 def _merge_named_lists(base: list, overlay: list, claims: frozenset, path: str) -> list:
+    base_names = [item["name"] for item in base]
+    duplicate_names = {name for name in base_names if base_names.count(name) > 1}
+
+    if duplicate_names:
+        # A name-keyed merge assumes unique names; volumeMounts is the one place a repeated
+        # name is legitimate (the same volume mounted at two different paths). Don't silently
+        # collapse those entries -- keep every base entry untouched, only appending overlay
+        # items whose name doesn't already appear in base. If the overlay tries to merge into
+        # one of the ambiguous names, there's no single entry to merge into, so raise rather
+        # than guess (and risk silently dropping one of the duplicate mounts).
+        ambiguous = duplicate_names & {item["name"] for item in overlay}
+        if ambiguous:
+            raise ConfigError(
+                f"cannot merge {path!r}: the base list has more than one entry named "
+                f"{sorted(ambiguous)!r}, and passthrough config also references it -- "
+                "ambiguous which entry to merge into"
+            )
+        result = list(base)
+        seen = set(base_names)
+        for item in overlay:
+            if item["name"] not in seen:
+                result.append(item)
+                seen.add(item["name"])
+        return result
+
     by_name = {item["name"]: item for item in base}
-    order = [item["name"] for item in base]
+    order = base_names
     for item in overlay:
         name = item["name"]
         child_path = f"{path}/[name={name}]"

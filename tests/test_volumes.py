@@ -126,6 +126,14 @@ def test_auto_mount_source_excludes_squarepeg_owned_keys():
     assert "read_only" not in mounts[0].source
 
 
+def test_auto_mount_with_no_volume_source_falls_back_to_none():
+    """Regression: an entry with only mount_path (no persistentVolumeClaim/emptyDir/etc.) must
+    not produce an empty {} source -- that renders as a k8s volume with no type at all. It
+    should fall back to None, same as an entirely unconfigured -v name falls back to emptyDir."""
+    mounts = auto_mounts_from_config({"scratch": {"mount_path": "/scratch"}})
+    assert mounts[0].source is None
+
+
 def test_cli_v_reference_strips_squarepeg_owned_keys_from_source():
     """A volume that's ALSO auto-mounted (has mount_path/read_only) must not leak those
     squarepeg-only keys into the k8s source when referenced via -v too."""

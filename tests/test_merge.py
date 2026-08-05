@@ -1,3 +1,6 @@
+import pytest
+
+from squarepeg.errors import ConfigError
 from squarepeg.merge import deep_merge
 
 
@@ -92,3 +95,53 @@ def test_new_key_appears_from_overlay():
     result = deep_merge(base, overlay, frozenset(), path="")
     assert result["spec"]["nodeSelector"] == {"disk": "ssd"}
     assert result["spec"]["containers"] == [{"name": "main"}]
+
+
+# --- duplicate-named entries in a named list (e.g. the same volume mounted twice) ---
+
+
+def test_duplicate_named_entries_survive_unrelated_overlay_addition():
+    """Regression: volumeMounts is the one k8s list where a repeated 'name' is legitimate
+    (the same volume mounted at two different paths). An overlay that doesn't reference
+    either of those duplicate-named entries must not collapse them."""
+    base = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "main",
+                    "volumeMounts": [
+                        {"name": "scratch", "mountPath": "/a"},
+                        {"name": "scratch", "mountPath": "/b"},
+                    ],
+                }
+            ]
+        }
+    }
+    overlay = {
+        "spec": {"containers": [{"name": "main", "volumeMounts": [{"name": "other", "mountPath": "/other"}]}]}
+    }
+    result = deep_merge(base, overlay, frozenset(), path="")
+    mounts = result["spec"]["containers"][0]["volumeMounts"]
+    assert {"name": "scratch", "mountPath": "/a"} in mounts
+    assert {"name": "scratch", "mountPath": "/b"} in mounts
+    assert {"name": "other", "mountPath": "/other"} in mounts
+    assert len(mounts) == 3
+
+
+def test_overlay_referencing_an_ambiguous_duplicate_name_raises():
+    base = {
+        "spec": {
+            "containers": [
+                {
+                    "name": "main",
+                    "volumeMounts": [
+                        {"name": "scratch", "mountPath": "/a"},
+                        {"name": "scratch", "mountPath": "/b"},
+                    ],
+                }
+            ]
+        }
+    }
+    overlay = {"spec": {"containers": [{"name": "main", "volumeMounts": [{"name": "scratch", "mountPath": "/c"}]}]}}
+    with pytest.raises(ConfigError, match="scratch"):
+        deep_merge(base, overlay, frozenset(), path="")

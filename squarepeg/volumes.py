@@ -29,10 +29,13 @@ def _sanitize_volume_name(raw: str) -> str:
     return name or "vol"
 
 
-def _volume_source_from_entry(entry: dict) -> dict:
+def _volume_source_from_entry(entry: dict) -> dict | None:
     """Strip squarepeg-owned keys (mount_path, read_only) from a config volumes.NAME entry,
-    leaving just the k8s volume source (persistentVolumeClaim, emptyDir, etc.)."""
-    return {k: v for k, v in entry.items() if k not in _SQUAREPEG_OWNED_VOLUME_KEYS}
+    leaving just the k8s volume source (persistentVolumeClaim, emptyDir, etc.). Returns None
+    (rather than {}) if nothing is left, so callers fall back to emptyDir the same way an
+    entirely unconfigured volume name already does."""
+    source = {k: v for k, v in entry.items() if k not in _SQUAREPEG_OWNED_VOLUME_KEYS}
+    return source or None
 
 
 def auto_mounts_from_config(config_volumes: dict) -> list[VolumeMount]:
