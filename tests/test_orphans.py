@@ -13,6 +13,14 @@ NOW = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 CREATED_BY = "sam"
 
 
+@pytest.fixture(autouse=True)
+def _fixed_created_by(monkeypatch):
+    """sweep_orphans() derives 'who am I' from current_created_by() (real OS user), but every
+    fixture in this file hardcodes CREATED_BY -- pin it so results don't depend on whatever
+    user actually runs the test."""
+    monkeypatch.setattr(orphans, "current_created_by", lambda: CREATED_BY)
+
+
 def make_session(pods=(), jobs=()):
     session = SimpleNamespace()
     session.namespace = "default"
