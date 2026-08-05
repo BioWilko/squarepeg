@@ -34,6 +34,30 @@ def test_pod_managed_labels_and_run_id():
     assert "squarepeg.io/created-by" in labels
 
 
+def test_pod_default_has_no_keep_label():
+    pod = build_pod(basic_spec(cleanup=True), run_id=RUN_ID)
+    assert "squarepeg.io/keep" not in pod["metadata"]["labels"]
+
+
+def test_pod_kept_carries_keep_label():
+    pod = build_pod(basic_spec(cleanup=False), run_id=RUN_ID)
+    assert pod["metadata"]["labels"]["squarepeg.io/keep"] == "true"
+
+
+def test_job_default_has_no_keep_label_on_job_or_template():
+    j = build_job(basic_spec(cleanup=True), run_id=RUN_ID)
+    assert "squarepeg.io/keep" not in j["metadata"]["labels"]
+    assert "squarepeg.io/keep" not in j["spec"]["template"]["metadata"]["labels"]
+
+
+def test_job_kept_carries_keep_label_on_both_job_and_template():
+    """The keep label must land on both the Job and its pod template, since the sweep
+    queries both kinds and the child pod inherits the identical label set."""
+    j = build_job(basic_spec(cleanup=False), run_id=RUN_ID)
+    assert j["metadata"]["labels"]["squarepeg.io/keep"] == "true"
+    assert j["spec"]["template"]["metadata"]["labels"]["squarepeg.io/keep"] == "true"
+
+
 def test_pod_workdir_tty_stdin_pull_policy():
     spec = basic_spec(workdir="/work", tty=True, stdin=True, pull_policy="Always")
     pod = build_pod(spec, run_id=RUN_ID)

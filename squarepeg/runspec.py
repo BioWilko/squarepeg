@@ -33,6 +33,8 @@ class RunSpec:
     cleanup: bool = True
     timeout: int = 300
     quiet: bool = False
+    orphan_sweep: bool = True
+    orphan_sweep_min_age: int = 300
 
     # JSON-pointer-ish paths the CLI explicitly set, used to make config
     # passthrough (Phase B, see merge.py) lose to explicit CLI flags.

@@ -25,6 +25,9 @@ timeout: 300                 # seconds to wait for the container to start
 quiet: false
 allow_host_path_mounts: false
 split_streams: false
+orphan_sweep: true           # also delete YOUR OWN leftovers from crashed previous runs
+                              # (finished-but-undeleted, or stuck forever on a bad image)
+orphan_sweep_min_age: 300     # seconds a leftover must be finished/stuck before it's eligible
 
 # applied unless the equivalent CLI flag is given
 defaults:

@@ -32,6 +32,8 @@ ALLOWED_TOP_KEYS = {
     "quiet",
     "allow_host_path_mounts",
     "split_streams",
+    "orphan_sweep",
+    "orphan_sweep_min_age",
     "defaults",
     "volumes",
     "kubernetes",

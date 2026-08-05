@@ -2,79 +2,28 @@
 extract its exit code, and clean up.
 """
 
-import json
 import signal
 import threading
 
-from kubernetes import client, watch
+from kubernetes import watch
 from kubernetes.client.rest import ApiException
 
-from squarepeg.errors import ApiError, InterruptError, RunnerError
+from squarepeg.errors import InterruptError, RunnerError
+from squarepeg.k8s.apierrors import delete_resource, wrap_api_exception
 from squarepeg.k8s.events import print_pod_events
 from squarepeg.k8s.logs import stream_logs
+from squarepeg.k8s.orphans import sweep_orphans
+from squarepeg.k8s.podstate import FAIL_FAST_REASONS
+from squarepeg.labels import RUN_ID_LABEL
 from squarepeg.log import chatter
 from squarepeg.runspec import RunSpec
 
-FAIL_FAST_REASONS = {
-    "ImagePullBackOff",
-    "ErrImagePull",
-    "InvalidImageName",
-    "CreateContainerConfigError",
-    "CreateContainerError",
-    "RunContainerError",
-    "CrashLoopBackOff",
-}
-
-_API_ERROR_HINTS = {
-    400: "the apiserver rejected the manifest as malformed; run with --dry-run to inspect it",
-    401: "authentication failed; try 'kubectl get pods' to check your credentials",
-    403: "permission denied; check with 'kubectl auth can-i create pods'",
-    404: "not found; check the namespace exists",
-    409: "already exists; omit --name, or clean up a --keep'd previous run",
-    422: "the apiserver rejected the manifest; run with --dry-run to inspect it",
-}
-
-# A ResourceQuota admission rejection also arrives as HTTP 403, but it has nothing to do with
-# RBAC permissions -- the generic 403 hint above ("check with kubectl auth can-i") is actively
-# misleading here. Detected by the admission plugin's standard "failed quota: ..." message
-# text, which names the missing requests/limits per container.
-_QUOTA_ERROR_MARKER = "failed quota"
-_QUOTA_HINT = (
-    "the target namespace enforces a ResourceQuota requiring cpu/memory requests (and "
-    "possibly limits) on every container; set --cpus/--memory (or --request-cpu/--request-"
-    "memory/--limit-cpu/--limit-memory), or 'defaults.cpus'/'defaults.memory' in config so "
-    "you don't have to pass them on every run"
-)
+# kept as module-level aliases: existing callers/tests referencing these names still work
+_wrap_api_exception = wrap_api_exception
 
 # how long a single watch call may block waiting for the pod to become terminal,
 # once it has already started; the loop simply re-watches if this elapses.
 TERMINAL_WATCH_POLL_SECONDS = 3600
-
-
-def _api_exception_detail(exc: ApiException) -> str:
-    """Extract the Kubernetes Status object's 'message' field from the response body, if
-    present -- this is almost always far more specific than exc.reason (the bare HTTP
-    reason phrase, e.g. 'Bad Request'), naming the exact field the apiserver rejected."""
-    if exc.body:
-        try:
-            body = json.loads(exc.body)
-        except (TypeError, ValueError):
-            body = None
-        if isinstance(body, dict) and body.get("message"):
-            return body["message"]
-    return exc.reason
-
-
-def _wrap_api_exception(exc: ApiException, action: str) -> ApiError:
-    detail = _api_exception_detail(exc)
-    if exc.status == 403 and _QUOTA_ERROR_MARKER in detail.lower():
-        hint = _QUOTA_HINT
-    else:
-        hint = _API_ERROR_HINTS.get(exc.status)
-    message = f"{action}: {detail}"
-    if hint:
-        message += f" ({hint})"
-    return ApiError(message)
 
 
 def create_resource(session, spec: RunSpec, manifest: dict) -> None:
@@ -85,7 +34,7 @@ def create_resource(session, spec: RunSpec, manifest: dict) -> None:
         else:
             session.core.create_namespaced_pod(session.namespace, manifest)
     except ApiException as exc:
-        raise _wrap_api_exception(exc, f"failed to create {spec.mode} {name!r}") from exc
+        raise wrap_api_exception(exc, f"failed to create {spec.mode} {name!r}") from exc
 
 
 def discover_job_pod(session, job_name: str, timeout: int) -> str:
@@ -183,17 +132,7 @@ def extract_exit_code(session, pod_name: str, container_name: str) -> tuple[int,
 
 
 def cleanup(session, spec: RunSpec, name: str) -> None:
-    try:
-        if spec.mode == "job":
-            session.batch.delete_namespaced_job(
-                name, session.namespace, body=client.V1DeleteOptions(propagation_policy="Background")
-            )
-        else:
-            session.core.delete_namespaced_pod(name, session.namespace)
-    except ApiException as exc:
-        if exc.status == 404:
-            return
-        raise _wrap_api_exception(exc, f"failed to delete {spec.mode} {name!r}") from exc
+    delete_resource(session, spec.mode, name)
 
 
 class _InterruptHandler:
@@ -286,3 +225,9 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
                 cleanup(session, spec, name)
             elif not handler.abandoned and not spec.quiet:
                 chatter(f"kept {spec.mode} {name!r}; inspect with 'kubectl describe {spec.mode} {name}'", quiet=False)
+            if spec.orphan_sweep and not handler.abandoned:
+                own_run_id = manifest.get("metadata", {}).get("labels", {}).get(RUN_ID_LABEL)
+                try:
+                    sweep_orphans(session, spec, exclude_run_id=own_run_id)
+                except Exception as exc:
+                    chatter(f"orphan sweep skipped: {exc}", quiet=spec.quiet)

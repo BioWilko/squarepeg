@@ -3,23 +3,33 @@ arbitrary k8s passthrough config can be deep-merged in directly and
 --dry-run output is exactly what would be sent to the apiserver.
 """
 
-import getpass
 import uuid
 
+from squarepeg.labels import (
+    CREATED_BY_LABEL,
+    KEEP_LABEL,
+    KEEP_VALUE,
+    MANAGED_BY_LABEL,
+    MANAGED_BY_VALUE,
+    RUN_ID_LABEL,
+    current_created_by,
+)
 from squarepeg.merge import deep_merge
-from squarepeg.naming import sanitize_label_value
 from squarepeg.runspec import RunSpec
 from squarepeg.volumes import HostPathMount, VolumeMount
 
 DEFAULT_JOB_TTL_SECONDS_AFTER_FINISHED = 86400
 
 
-def _managed_labels(run_id: str | None = None) -> dict:
-    return {
-        "app.kubernetes.io/managed-by": "squarepeg",
-        "squarepeg.io/run-id": run_id or str(uuid.uuid4()),
-        "squarepeg.io/created-by": sanitize_label_value(getpass.getuser()),
+def _managed_labels(run_id: str | None = None, *, keep: bool = False) -> dict:
+    labels = {
+        MANAGED_BY_LABEL: MANAGED_BY_VALUE,
+        RUN_ID_LABEL: run_id or str(uuid.uuid4()),
+        CREATED_BY_LABEL: current_created_by(),
     }
+    if keep:
+        labels[KEEP_LABEL] = KEEP_VALUE
+    return labels
 
 
 def _volume_source(volume: VolumeMount) -> dict:
@@ -102,7 +112,7 @@ def _build_pod_spec(spec: RunSpec) -> dict:
 
 
 def build_pod(spec: RunSpec, kubernetes_passthrough: dict | None = None, run_id: str | None = None) -> dict:
-    metadata = {"name": spec.name, "labels": _managed_labels(run_id)}
+    metadata = {"name": spec.name, "labels": _managed_labels(run_id, keep=not spec.cleanup)}
     if spec.namespace:
         metadata["namespace"] = spec.namespace
 
@@ -123,7 +133,7 @@ def build_job(
     job_passthrough: dict | None = None,
     run_id: str | None = None,
 ) -> dict:
-    labels = _managed_labels(run_id)
+    labels = _managed_labels(run_id, keep=not spec.cleanup)
     job_metadata = {"name": spec.name, "labels": dict(labels)}
     if spec.namespace:
         job_metadata["namespace"] = spec.namespace

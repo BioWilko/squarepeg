@@ -375,3 +375,48 @@ def test_volumes_entry_value_must_be_a_mapping(tmp_path, monkeypatch):
     bad = write(tmp_path / "bad.yaml", "volumes:\n  scratch: not-a-mapping\n")
     with pytest.raises(ConfigError, match="scratch"):
         config.load_effective_config((str(bad),))
+
+
+# --- orphan_sweep / orphan_sweep_min_age ---
+
+
+def test_orphan_sweep_keys_load_without_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    doc = write(tmp_path / "doc.yaml", "orphan_sweep: false\norphan_sweep_min_age: 600\n")
+    effective, _ = config.load_effective_config((str(doc),))
+    assert effective["orphan_sweep"] is False
+    assert effective["orphan_sweep_min_age"] == 600
+
+
+def test_orphan_sweep_interpolated_string_coerces_to_bool(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.setenv("SQUAREPEG_TEST_SWEEP", "false")
+    doc = write(tmp_path / "doc.yaml", "orphan_sweep: ${SQUAREPEG_TEST_SWEEP}\n")
+    effective, _ = config.load_effective_config((str(doc),))
+    assert config.coerce_bool(effective["orphan_sweep"], "orphan_sweep") is False
+
+
+def test_orphan_sweep_min_age_interpolated_string_coerces_to_int(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.setenv("SQUAREPEG_TEST_MIN_AGE", "600")
+    doc = write(tmp_path / "doc.yaml", "orphan_sweep_min_age: ${SQUAREPEG_TEST_MIN_AGE}\n")
+    effective, _ = config.load_effective_config((str(doc),))
+    assert config.coerce_int(effective["orphan_sweep_min_age"], "orphan_sweep_min_age") == 600
+
+
+def test_orphan_sweep_misspelling_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    bad = write(tmp_path / "bad.yaml", "orphan_sweap: false\n")
+    with pytest.raises(ConfigError, match="orphan_sweap"):
+        config.load_effective_config((str(bad),))
+
+
+def test_orphan_sweep_keys_work_inside_a_profile(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    doc = write(
+        tmp_path / "doc.yaml",
+        "profiles:\n  strict:\n    orphan_sweep_min_age: 60\n",
+    )
+    effective, _ = config.load_effective_config((str(doc),))
+    resolved = config.select_profile(effective, "strict")
+    assert resolved["orphan_sweep_min_age"] == 60

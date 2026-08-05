@@ -391,3 +391,150 @@ def test_run_manifest_second_interrupt_skips_cleanup(monkeypatch):
     with pytest.raises(InterruptError):
         runner.run_manifest(session, basic_spec(mode="pod"), manifest)
     session.core.delete_namespaced_pod.assert_not_called()
+
+
+# --- run_manifest: orphan sweep integration ---
+
+
+def _happy_path_session():
+    session = make_session()
+    cs = container_status(name="main", terminated_code=0, terminated_reason="Completed")
+    session.core.read_namespaced_pod.return_value = pod_object(container_statuses=[cs])
+    return session
+
+
+def test_run_manifest_sweeps_after_cleanup(monkeypatch):
+    session = _happy_path_session()
+    monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Succeeded")}]))
+    calls = []
+    monkeypatch.setattr(runner, "sweep_orphans", lambda *a, **k: calls.append("swept") or 0)
+
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123", "labels": {"squarepeg.io/run-id": "this-run"}}}
+    code = runner.run_manifest(session, basic_spec(mode="pod"), manifest)
+
+    assert code == 0
+    session.core.delete_namespaced_pod.assert_called_once()
+    assert calls == ["swept"]
+
+
+def test_run_manifest_passes_own_run_id_to_exclude(monkeypatch):
+    session = _happy_path_session()
+    monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Succeeded")}]))
+    captured = {}
+
+    def fake_sweep(_session, _spec, *, exclude_run_id=None):
+        captured["exclude_run_id"] = exclude_run_id
+        return 0
+
+    monkeypatch.setattr(runner, "sweep_orphans", fake_sweep)
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123", "labels": {"squarepeg.io/run-id": "this-run"}}}
+    runner.run_manifest(session, basic_spec(mode="pod"), manifest)
+
+    assert captured["exclude_run_id"] == "this-run"
+
+
+@pytest.mark.parametrize(
+    "sweep_error",
+    [ApiError("boom"), TypeError("bad timestamp")],
+)
+def test_sweep_failure_never_changes_a_successful_exit_code(monkeypatch, sweep_error):
+    session = _happy_path_session()
+    monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Succeeded")}]))
+
+    def raising_sweep(*_a, **_k):
+        raise sweep_error
+
+    monkeypatch.setattr(runner, "sweep_orphans", raising_sweep)
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123"}}
+    code = runner.run_manifest(session, basic_spec(mode="pod"), manifest)
+    assert code == 0
+
+
+def test_sweep_failure_never_changes_a_nonzero_exit_code(monkeypatch):
+    session = make_session()
+    monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Succeeded")}]))
+    cs = container_status(name="main", terminated_code=7, terminated_reason="Error")
+    session.core.read_namespaced_pod.return_value = pod_object(container_statuses=[cs])
+    monkeypatch.setattr(runner, "sweep_orphans", lambda *a, **k: (_ for _ in ()).throw(ApiError("boom")))
+
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123"}}
+    code = runner.run_manifest(session, basic_spec(mode="pod"), manifest)
+    assert code == 7
+
+
+def test_sweep_failure_does_not_mask_the_real_runner_error(monkeypatch):
+    """The most important case: if the run was already failing (e.g. a bad image), a sweep
+    failure in the finally block must never replace the original diagnosis."""
+    session = make_session()
+    cs = container_status(waiting_reason="ImagePullBackOff", waiting_message="bad image")
+    monkeypatch.setattr(
+        runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Pending", container_statuses=[cs])}])
+    )
+    monkeypatch.setattr(runner, "sweep_orphans", lambda *a, **k: (_ for _ in ()).throw(ApiError("sweep boom")))
+
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123"}}
+    with pytest.raises(RunnerError, match="bad image"):
+        runner.run_manifest(session, basic_spec(mode="pod"), manifest)
+
+
+def test_sweep_failure_reported_via_chatter(monkeypatch, capsys):
+    session = _happy_path_session()
+    monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Succeeded")}]))
+    monkeypatch.setattr(runner, "sweep_orphans", lambda *a, **k: (_ for _ in ()).throw(ApiError("boom")))
+
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123"}}
+    runner.run_manifest(session, basic_spec(mode="pod"), manifest)
+    assert "orphan sweep skipped" in capsys.readouterr().err
+
+
+def test_sweep_failure_suppressed_under_quiet(monkeypatch, capsys):
+    session = _happy_path_session()
+    monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Succeeded")}]))
+    monkeypatch.setattr(runner, "sweep_orphans", lambda *a, **k: (_ for _ in ()).throw(ApiError("boom")))
+
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123"}}
+    runner.run_manifest(session, basic_spec(mode="pod", quiet=True), manifest)
+    assert capsys.readouterr().err == ""
+
+
+def test_orphan_sweep_false_skips_sweep_entirely(monkeypatch):
+    session = _happy_path_session()
+    monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Succeeded")}]))
+    sweep = MagicMock()
+    monkeypatch.setattr(runner, "sweep_orphans", sweep)
+
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123"}}
+    runner.run_manifest(session, basic_spec(mode="pod", orphan_sweep=False), manifest)
+    sweep.assert_not_called()
+
+
+def test_second_interrupt_skips_sweep_too(monkeypatch):
+    session = make_session()
+
+    def wait_and_double_interrupt(*_args, **_kwargs):
+        os.kill(os.getpid(), signal.SIGINT)
+        os.kill(os.getpid(), signal.SIGINT)
+        return "Succeeded"
+
+    monkeypatch.setattr(runner, "wait_until_running_or_terminal", wait_and_double_interrupt)
+    sweep = MagicMock()
+    monkeypatch.setattr(runner, "sweep_orphans", sweep)
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123"}}
+    with pytest.raises(InterruptError):
+        runner.run_manifest(session, basic_spec(mode="pod"), manifest)
+    sweep.assert_not_called()
+
+
+def test_keep_still_sweeps_other_orphans(monkeypatch):
+    """--keep (cleanup=False) is a statement about THIS run's own resource; the sweep is
+    about previous runs' resources, and the two are orthogonal."""
+    session = _happy_path_session()
+    monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Succeeded")}]))
+    sweep = MagicMock(return_value=0)
+    monkeypatch.setattr(runner, "sweep_orphans", sweep)
+
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123"}}
+    runner.run_manifest(session, basic_spec(mode="pod", cleanup=False), manifest)
+
+    session.core.delete_namespaced_pod.assert_not_called()
+    sweep.assert_called_once()

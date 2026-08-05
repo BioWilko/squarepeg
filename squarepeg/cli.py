@@ -236,6 +236,10 @@ def run(
     timeout = timeout if timeout is not None else coerce_int(resolved_config.get("timeout", 300), "timeout")
     quiet = quiet or coerce_bool(resolved_config.get("quiet", False), "quiet")
     cleanup = False if keep else coerce_bool(resolved_config.get("cleanup", True), "cleanup")
+    orphan_sweep = coerce_bool(resolved_config.get("orphan_sweep", True), "orphan_sweep")
+    orphan_sweep_min_age = coerce_int(resolved_config.get("orphan_sweep_min_age", 300), "orphan_sweep_min_age")
+    if orphan_sweep_min_age < 0:
+        raise UsageError(f"'orphan_sweep_min_age' must not be negative, got {orphan_sweep_min_age}")
 
     entrypoint_tuple = (entrypoint,) if entrypoint is not None else None
     if entrypoint_tuple is not None:
@@ -276,6 +280,8 @@ def run(
         cleanup=cleanup,
         timeout=timeout,
         quiet=quiet,
+        orphan_sweep=orphan_sweep,
+        orphan_sweep_min_age=orphan_sweep_min_age,
         claims=claims,
     )
 

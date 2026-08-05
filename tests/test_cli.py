@@ -130,3 +130,25 @@ def test_run_dry_run_ambiguous_passthrough_volume_mounts_raises_clear_error(tmp_
     )
     assert result.exit_code != 0
     assert "scratch" in str(result.exception)
+
+
+def test_run_dry_run_accepts_orphan_sweep_config_keys(tmp_path):
+    """Confirms the config -> RunSpec wiring for orphan_sweep/orphan_sweep_min_age doesn't
+    break the normal dry-run path (these keys don't affect the rendered manifest at all)."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("orphan_sweep: false\norphan_sweep_min_age: 60\n")
+    result = CliRunner().invoke(
+        cli, ["run", "--no-default-config", "--config", str(config_file), "--dry-run", "alpine"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "kind: Pod" in result.output
+
+
+def test_run_negative_orphan_sweep_min_age_rejected(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("orphan_sweep_min_age: -1\n")
+    result = CliRunner().invoke(
+        cli, ["run", "--no-default-config", "--config", str(config_file), "--dry-run", "alpine"]
+    )
+    assert result.exit_code != 0
+    assert "orphan_sweep_min_age" in str(result.exception)
