@@ -5,6 +5,7 @@ from squarepeg import __version__
 from squarepeg.config import coerce_bool, coerce_int, load_effective_config, select_profile
 from squarepeg.dockerargs import check_supported_image, parse_env_entries, reject_unsupported
 from squarepeg.errors import SquarepegError, UsageError
+from squarepeg.k8s.dryrun import server_dry_run
 from squarepeg.k8s.runner import run_manifest
 from squarepeg.k8s.session import Session
 from squarepeg.manifest import build_job, build_pod
@@ -150,6 +151,8 @@ def run(
     check_supported_image(image)
     if rm_flag and keep:
         raise UsageError("--rm and --keep are mutually exclusive")
+    if dry_run and dry_run_server:
+        raise UsageError("--dry-run and --dry-run-server are mutually exclusive")
 
     resolved_config, _sources = _resolve_config(config_paths, no_default_config, profile)
     config_defaults = resolved_config.get("defaults") or {}
@@ -293,7 +296,11 @@ def run(
         manifest = build_pod(spec, kubernetes_passthrough)
 
     if dry_run_server:
-        raise click.ClickException("--dry-run-server requires a cluster connection, not implemented yet")
+        session = Session(namespace=spec.namespace, context=context, quiet=spec.quiet)
+        spec.namespace = session.namespace
+        validated = server_dry_run(session, spec, manifest)
+        click.echo(yaml.safe_dump(validated, sort_keys=False), nl=False)
+        return
     if dry_run:
         click.echo(yaml.safe_dump(manifest, sort_keys=False), nl=False)
         return
