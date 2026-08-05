@@ -313,3 +313,65 @@ def test_config_without_dollar_signs_behaves_identically(tmp_path, monkeypatch):
     doc = write(tmp_path / "doc.yaml", "namespace: plain-ns\ndefaults: {cpus: '2'}\n")
     effective, _ = config.load_effective_config((str(doc),))
     assert effective == {"namespace": "plain-ns", "defaults": {"cpus": "2"}}
+
+
+# --- volumes.NAME auto-mount fields: mount_path / read_only ---
+
+
+def test_volumes_entry_with_valid_mount_path_loads_fine(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    doc = write(tmp_path / "doc.yaml", "volumes:\n  scratch:\n    emptyDir: {}\n    mount_path: /scratch\n")
+    effective, _ = config.load_effective_config((str(doc),))
+    assert effective["volumes"]["scratch"]["mount_path"] == "/scratch"
+
+
+def test_volumes_entry_mount_path_must_be_absolute(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    bad = write(tmp_path / "bad.yaml", "volumes:\n  scratch:\n    emptyDir: {}\n    mount_path: scratch\n")
+    with pytest.raises(ConfigError, match="mount_path"):
+        config.load_effective_config((str(bad),))
+
+
+def test_volumes_entry_read_only_must_be_bool_coercible(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    bad = write(
+        tmp_path / "bad.yaml", "volumes:\n  scratch:\n    emptyDir: {}\n    mount_path: /x\n    read_only: maybe\n"
+    )
+    with pytest.raises(ConfigError, match="read_only"):
+        config.load_effective_config((str(bad),))
+
+
+def test_volumes_entry_read_only_accepts_interpolated_bool_string(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    monkeypatch.setenv("SQUAREPEG_TEST_RO", "true")
+    doc = write(
+        tmp_path / "doc.yaml",
+        "volumes:\n  scratch:\n    emptyDir: {}\n    mount_path: /x\n    read_only: ${SQUAREPEG_TEST_RO}\n",
+    )
+    effective, _ = config.load_effective_config((str(doc),))
+    assert config.coerce_bool(effective["volumes"]["scratch"]["read_only"], "x") is True
+
+
+def test_volumes_entry_without_mount_path_still_valid(tmp_path, monkeypatch):
+    """Backward compatibility: existing configs (no mount_path/read_only at all) load unchanged."""
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    doc = write(
+        tmp_path / "doc.yaml",
+        "volumes:\n  refdata:\n    persistentVolumeClaim: {claimName: refdata-pvc, readOnly: true}\n",
+    )
+    effective, _ = config.load_effective_config((str(doc),))
+    assert "mount_path" not in effective["volumes"]["refdata"]
+
+
+def test_volumes_value_must_be_a_mapping(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    bad = write(tmp_path / "bad.yaml", "volumes:\n  - not-a-mapping\n")
+    with pytest.raises(ConfigError, match="volumes"):
+        config.load_effective_config((str(bad),))
+
+
+def test_volumes_entry_value_must_be_a_mapping(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DEFAULT_CONFIG_PATH", tmp_path / "missing.yaml")
+    bad = write(tmp_path / "bad.yaml", "volumes:\n  scratch: not-a-mapping\n")
+    with pytest.raises(ConfigError, match="scratch"):
+        config.load_effective_config((str(bad),))

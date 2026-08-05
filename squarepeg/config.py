@@ -109,6 +109,25 @@ def validate_document(doc: dict, source: str, *, allow_profiles: bool = True) ->
             if not isinstance(body, dict):
                 raise ConfigError(f"profile {name!r} in {source} must be a mapping")
             validate_document(body, f"{source} (profile {name!r})", allow_profiles=False)
+    volumes = doc.get("volumes")
+    if volumes:
+        if not isinstance(volumes, dict):
+            raise ConfigError(f"'volumes' in {source} must be a mapping")
+        for name, entry in volumes.items():
+            if not isinstance(entry, dict):
+                raise ConfigError(f"volume {name!r} in {source} must be a mapping")
+            # squarepeg only validates its own keys here; the rest of the entry is an
+            # opaque k8s volume source (persistentVolumeClaim, emptyDir, ...) that the
+            # apiserver validates -- same exemption as the 'kubernetes'/'job' sections.
+            if "mount_path" in entry:
+                mount_path = entry["mount_path"]
+                if not isinstance(mount_path, str) or not mount_path.startswith("/"):
+                    raise ConfigError(
+                        f"volumes.{name}.mount_path in {source} must be an absolute container "
+                        f"path (got {mount_path!r})"
+                    )
+            if "read_only" in entry:
+                coerce_bool(entry["read_only"], f"volumes.{name}.read_only (in {source})")
 
 
 def load_effective_config(

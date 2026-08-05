@@ -48,6 +48,22 @@ generated manifest) and are not validated by squarepeg itself — use
 spec, even in `--mode job`; squarepeg re-homes it under the Job's pod
 template so the same config works in either mode.
 
+### Volumes
+
+Each entry under `volumes.NAME` holds a Kubernetes volume source (`persistentVolumeClaim`, `emptyDir`, etc.) plus two optional squarepeg-owned fields:
+
+```yaml
+volumes:
+  refdata:                                  # only mounted if the user does -v refdata:/x
+    persistentVolumeClaim: {claimName: refdata-pvc, readOnly: true}
+  scratch:                                  # mounted automatically on EVERY run, no -v needed
+    emptyDir: {sizeLimit: 10Gi}
+    mount_path: /scratch
+    read_only: false                        # optional, defaults to false
+```
+
+Presence of `mount_path` is what decides the behaviour — an entry without it works exactly as before (available for `-v NAME:/path` to reference; not mounted otherwise). If a user's own `-v` references a volume that's already auto-mounted, both mounts exist side by side in the container (Kubernetes allows mounting the same volume at multiple paths) — there's no CLI flag to opt out of an auto-mount; a user who wants different behaviour edits their own `--config` layer or selects a different `--profile`, same as any other config-driven default.
+
 ### Environment variable references
 
 Any string value anywhere in a config file — including inside the

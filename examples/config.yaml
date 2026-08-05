@@ -35,12 +35,18 @@ defaults:
   env:
     TZ: Europe/London
 
-# named volumes, referenced as  -v NAME:/mount/path
+# named volumes. Two behaviours, gated by the presence of 'mount_path':
+#   - no mount_path: available for a user to reference with  -v NAME:/mount/path
+#   - with mount_path: mounted automatically on EVERY run, no -v needed at all
 volumes:
   scratch:
-    emptyDir: {sizeLimit: 10Gi}
+    emptyDir: {sizeLimit: 10Gi}                    # only mounted if the user does -v scratch:/x
   refdata:
     persistentVolumeClaim: {claimName: "${REFDATA_PVC}", readOnly: true}
+  shared-tools:                                    # auto-mounted at /opt/tools on every run
+    persistentVolumeClaim: {claimName: shared-tools-pvc, readOnly: true}
+    mount_path: /opt/tools
+    read_only: true
 
 # arbitrary k8s passthrough, merged into the generated manifest.
 # `spec` here is ALWAYS a pod spec, even in --mode job -- squarepeg re-homes

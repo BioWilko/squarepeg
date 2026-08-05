@@ -31,7 +31,12 @@ def _volume_source(volume: VolumeMount) -> dict:
 
 
 def _build_volumes(spec: RunSpec) -> list[dict]:
-    return [{"name": v.volume_name, **_volume_source(v)} for v in spec.volumes]
+    # a Pod's spec.volumes must have unique names even if the same volume is mounted twice
+    # (via two volumeMounts entries at different paths) -- first-seen source wins.
+    volumes_by_name: dict[str, dict] = {}
+    for v in spec.volumes:
+        volumes_by_name.setdefault(v.volume_name, {"name": v.volume_name, **_volume_source(v)})
+    return list(volumes_by_name.values())
 
 
 def _build_volume_mounts(spec: RunSpec) -> list[dict]:

@@ -1,9 +1,14 @@
 import re
 from dataclasses import dataclass
 
+from squarepeg.config import coerce_bool
 from squarepeg.errors import UsageError
 
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+
+# keys squarepeg itself reads from a volumes.NAME config entry; everything else is
+# an opaque k8s volume source (persistentVolumeClaim, emptyDir, etc.) passed through verbatim
+_SQUAREPEG_OWNED_VOLUME_KEYS = {"mount_path", "read_only"}
 
 
 @dataclass
@@ -22,6 +27,34 @@ class HostPathMount(VolumeMount):
 def _sanitize_volume_name(raw: str) -> str:
     name = re.sub(r"[^a-z0-9-]+", "-", raw.lower()).strip("-")
     return name or "vol"
+
+
+def _volume_source_from_entry(entry: dict) -> dict:
+    """Strip squarepeg-owned keys (mount_path, read_only) from a config volumes.NAME entry,
+    leaving just the k8s volume source (persistentVolumeClaim, emptyDir, etc.)."""
+    return {k: v for k, v in entry.items() if k not in _SQUAREPEG_OWNED_VOLUME_KEYS}
+
+
+def auto_mounts_from_config(config_volumes: dict) -> list[VolumeMount]:
+    """Build a VolumeMount for every volumes.NAME config entry that declares 'mount_path' --
+    these are mounted on every run automatically, without the user passing -v."""
+    mounts = []
+    for raw_name, entry in (config_volumes or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        mount_path = entry.get("mount_path")
+        if not mount_path:
+            continue
+        read_only = coerce_bool(entry.get("read_only", False), f"volumes.{raw_name}.read_only")
+        mounts.append(
+            VolumeMount(
+                volume_name=_sanitize_volume_name(raw_name),
+                container_path=mount_path,
+                read_only=read_only,
+                source=_volume_source_from_entry(entry),
+            )
+        )
+    return mounts
 
 
 def parse_volume_flag(raw: str, *, config_volumes: dict, allow_host_path_mounts: bool) -> VolumeMount:
@@ -70,6 +103,7 @@ def parse_volume_flag(raw: str, *, config_volumes: dict, allow_host_path_mounts:
     if not _NAME_RE.match(source_spec):
         raise UsageError(f"invalid volume name {source_spec!r} in -v/--volume value {raw!r}")
 
-    source = config_volumes.get(source_spec)
+    raw_entry = config_volumes.get(source_spec)
+    source = _volume_source_from_entry(raw_entry) if isinstance(raw_entry, dict) else raw_entry
     name = _sanitize_volume_name(source_spec)
     return VolumeMount(volume_name=name, container_path=container_path, read_only=read_only, source=source)

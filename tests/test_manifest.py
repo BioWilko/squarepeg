@@ -51,6 +51,22 @@ def test_pod_volumes_paired_with_mounts():
     assert pod["spec"]["containers"][0]["volumeMounts"] == [{"name": "scratch", "mountPath": "/scratch"}]
 
 
+def test_pod_same_volume_mounted_twice_produces_one_volume_entry():
+    """Regression: a Pod's spec.volumes must have unique names even when the same
+    volume is mounted at two different paths via two VolumeMount entries."""
+    source = {"persistentVolumeClaim": {"claimName": "shared-pvc"}}
+    mounts = [
+        VolumeMount(volume_name="shared", container_path="/a", read_only=False, source=source),
+        VolumeMount(volume_name="shared", container_path="/b", read_only=True, source=source),
+    ]
+    pod = build_pod(basic_spec(volumes=mounts), run_id=RUN_ID)
+    assert pod["spec"]["volumes"] == [{"name": "shared", "persistentVolumeClaim": {"claimName": "shared-pvc"}}]
+    assert pod["spec"]["containers"][0]["volumeMounts"] == [
+        {"name": "shared", "mountPath": "/a"},
+        {"name": "shared", "mountPath": "/b", "readOnly": True},
+    ]
+
+
 def test_pod_resources_block_from_resource_spec():
     resources = ResourceSpec(request_cpu="500m", limit_cpu="500m", request_memory="512Mi", limit_memory="512Mi")
     pod = build_pod(basic_spec(resources=resources), run_id=RUN_ID)

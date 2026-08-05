@@ -11,7 +11,7 @@ from squarepeg.manifest import build_job, build_pod
 from squarepeg.naming import generate_name, validate_rfc1123
 from squarepeg.quantities import docker_cpus_to_k8s, docker_memory_to_k8s
 from squarepeg.runspec import ResourceSpec, RunSpec
-from squarepeg.volumes import parse_volume_flag
+from squarepeg.volumes import auto_mounts_from_config, parse_volume_flag
 
 _CONFIG_OPTIONS = [
     click.option(
@@ -162,13 +162,18 @@ def run(
     for key in parse_env_entries(env_entries):
         claims.add(f"/spec/containers/[name={container_name}]/env/[name={key}]")
 
-    volumes = [
+    cli_volumes = [
         parse_volume_flag(v, config_volumes=config_volumes, allow_host_path_mounts=allow_host_path_mounts)
         for v in volume_entries
     ]
-    for vol in volumes:
+    for vol in cli_volumes:
         claims.add(f"/spec/volumes/[name={vol.volume_name}]")
         claims.add(f"/spec/containers/[name={container_name}]/volumeMounts/[name={vol.volume_name}]")
+
+    # config-declared auto-mounts (volumes.NAME with a mount_path) are not claimed -- they're
+    # config-driven, not CLI-driven, so kubernetes.spec passthrough in the same config can still
+    # override them, same as any other config default (e.g. defaults.cpus).
+    volumes = auto_mounts_from_config(config_volumes) + cli_volumes
 
     resources = ResourceSpec()
     cli_set_cpus, cli_set_memory = cpus is not None, memory is not None
