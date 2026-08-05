@@ -10,7 +10,7 @@ squarepeg run alpine echo "hello from a pod"
 ## Install
 
 ```
-pip install -e ".[dev]"
+pip install squarepeg
 ```
 
 ## Docs
