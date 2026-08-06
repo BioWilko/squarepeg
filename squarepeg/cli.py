@@ -99,15 +99,18 @@ _LOGO = r"""
         /_/                     /_/         /____/   
 """.strip("\n")
 
-# a plain docstring can't be an f-string (only string literals populate __doc__), so the
-# logo is spliced in via Command's own help= kwarg instead.
-_CLI_HELP = f"\b\n{_LOGO}\n\nRun a docker-run-style command as a Kubernetes Pod or Job."
+class _LogoGroup(click.Group):
+    """Prints the ASCII logo above the 'Usage:' line, rather than as part of the help body."""
+
+    def format_usage(self, ctx, formatter):
+        formatter.write(_LOGO + "\n\n")
+        super().format_usage(ctx, formatter)
 
 
-@click.group(help=_CLI_HELP)
+@click.group(cls=_LogoGroup)
 @click.version_option(__version__, prog_name="squarepeg")
 def cli():
-    pass
+    """Run a docker-run-style command as a Kubernetes Pod or Job."""
 
 
 @cli.command(
