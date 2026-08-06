@@ -31,6 +31,28 @@ def test_run_dry_run_does_not_touch_a_cluster():
     assert "kind: Pod" in result.output
 
 
+def _without_run_id(manifest):
+    manifest = dict(manifest)
+    manifest["metadata"] = dict(manifest["metadata"])
+    manifest["metadata"]["labels"] = {
+        k: v for k, v in manifest["metadata"]["labels"].items() if k != "squarepeg.io/run-id"
+    }
+    return manifest
+
+
+def test_run_dry_run_output_unaffected_by_force_color(monkeypatch):
+    """--dry-run's YAML is machine-parseable output and must never be colourised/decorated,
+    regardless of $FORCE_COLOR -- only squarepeg's own status chatter goes through ui.py."""
+    args = ["run", "--no-default-config", "--name", "squarepeg-pinned-name", "--dry-run", "alpine"]
+    plain = CliRunner().invoke(cli, args)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    forced = CliRunner().invoke(cli, args)
+    assert "\x1b" not in forced.output
+    # squarepeg.io/run-id is a fresh random UUID per invocation by design; everything else
+    # must be byte-identical regardless of $FORCE_COLOR.
+    assert _without_run_id(yaml.safe_load(plain.output)) == _without_run_id(yaml.safe_load(forced.output))
+
+
 def test_run_missing_image_errors():
     result = CliRunner().invoke(cli, ["run"])
     assert result.exit_code != 0
@@ -221,15 +243,7 @@ def test_dry_run_server_sends_identical_manifest_to_dry_run(monkeypatch):
 
     # squarepeg.io/run-id is a fresh random UUID per invocation by design; strip it before
     # comparing, since it's the one label that's expected to legitimately differ here.
-    def without_run_id(manifest):
-        manifest = dict(manifest)
-        manifest["metadata"] = dict(manifest["metadata"])
-        manifest["metadata"]["labels"] = {
-            k: v for k, v in manifest["metadata"]["labels"].items() if k != "squarepeg.io/run-id"
-        }
-        return manifest
-
-    assert without_run_id(captured["manifest"]) == without_run_id(yaml.safe_load(dry_run_result.output))
+    assert _without_run_id(captured["manifest"]) == _without_run_id(yaml.safe_load(dry_run_result.output))
 
 
 def test_dry_run_server_constructs_session_with_context_and_quiet(monkeypatch):
@@ -281,3 +295,75 @@ def test_dry_run_server_no_cluster_connection_exits_125(monkeypatch):
     assert result.exit_code != 0
     assert result.exception.exit_code == 125
     assert "kubeconfig" in str(result.exception)
+
+
+# --- config group: bare 'config' defaults to 'show' ---
+
+
+def test_config_bare_equals_config_show():
+    bare = CliRunner().invoke(cli, ["config", "--no-default-config"])
+    show = CliRunner().invoke(cli, ["config", "show", "--no-default-config"])
+    assert bare.exit_code == 0, bare.output
+    assert show.exit_code == 0, show.output
+    assert bare.output == show.output
+
+
+def test_config_bare_no_sources_message():
+    result = CliRunner().invoke(cli, ["config", "--no-default-config"])
+    assert result.exit_code == 0, result.output
+    assert "no config files loaded" in result.output
+
+
+def test_config_bare_respects_profile(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("profiles:\n  p:\n    namespace: from-profile\n")
+    result = CliRunner().invoke(
+        cli, ["config", "--no-default-config", "--config", str(config_file), "--profile", "p"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "from-profile" in result.output
+
+
+def test_config_option_before_subcommand_matches_bare(tmp_path):
+    """Group-level options given before 'show' must still apply -- proves the default_map
+    seeding in the group callback actually wires the options through, rather than an
+    explicit 'show' silently discarding them."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("namespace: from-config\n")
+    before = CliRunner().invoke(cli, ["config", "--no-default-config", "--config", str(config_file), "show"])
+    bare = CliRunner().invoke(cli, ["config", "--no-default-config", "--config", str(config_file)])
+    assert before.exit_code == 0, before.output
+    assert bare.exit_code == 0, bare.output
+    assert before.output == bare.output
+    assert "from-config" in before.output
+
+
+def test_config_explicit_show_option_wins_over_group_level(tmp_path):
+    """An explicit 'config show --profile q' must win over a group-level '--profile p'."""
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "profiles:\n  p:\n    namespace: from-p\n  q:\n    namespace: from-q\n"
+    )
+    result = CliRunner().invoke(
+        cli,
+        [
+            "config",
+            "--no-default-config",
+            "--config",
+            str(config_file),
+            "--profile",
+            "p",
+            "show",
+            "--profile",
+            "q",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "from-q" in result.output
+    assert "from-p" not in result.output
+
+
+def test_config_unknown_subcommand_errors():
+    result = CliRunner().invoke(cli, ["config", "bogus"])
+    assert result.exit_code != 0
+    assert "No such command 'bogus'" in result.output

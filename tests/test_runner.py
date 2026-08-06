@@ -294,6 +294,33 @@ def test_run_manifest_happy_path_calls_in_order(monkeypatch):
     session.core.delete_namespaced_pod.assert_called_once_with("squarepeg-alpine-abc123", "default")
 
 
+def test_run_manifest_never_writes_status_output_to_stdout(monkeypatch, capsys):
+    """The colour/spinner mechanism must never touch stdout -- only the container's own
+    output (here faked by stream_logs) may land there."""
+
+    def fake_stream_logs(session, pod_name, container_name, stop_event, *, quiet=False):
+        import sys
+
+        sys.stdout.buffer.write(b"container output line\n")
+        sys.stdout.buffer.flush()
+
+    monkeypatch.setattr(runner, "stream_logs", fake_stream_logs)
+    session = make_session()
+    monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Succeeded")}]))
+    cs = container_status(name="main", terminated_code=0, terminated_reason="Completed")
+    session.core.read_namespaced_pod.return_value = pod_object(container_statuses=[cs])
+
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123"}}
+    code = runner.run_manifest(session, basic_spec(mode="pod"), manifest)
+
+    captured = capsys.readouterr()
+    assert code == 0
+    assert captured.out == "container output line\n"
+    assert "container output line" not in captured.err
+    assert "creating" in captured.err
+    assert "deleting" in captured.err
+
+
 def test_run_manifest_does_not_truncate_logs_for_already_terminal_pod(monkeypatch):
     """Regression test: when the pod is already Succeeded/Failed by the time
     wait_until_running_or_terminal returns (typical for fast-exiting containers), the log

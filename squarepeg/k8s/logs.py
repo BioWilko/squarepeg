@@ -115,12 +115,13 @@ def stream_logs(session, pod_name: str, container_name: str, stop_event, *, quie
                     f"log stream for pod {pod_name!r} failed after {attempt - 1} reconnect attempts ({exc}); "
                     "still waiting for the pod to finish",
                     quiet=quiet,
+                    level="warn",
                 )
                 return
             if dedupe.last_ts is not None:
                 since_seconds = since_seconds_from(dedupe.last_ts)
             backoff = min(2**attempt, MAX_BACKOFF_SECONDS)
-            chatter(f"log stream for pod {pod_name!r} dropped, reconnecting in {backoff}s", quiet=quiet)
+            chatter(f"log stream for pod {pod_name!r} dropped, reconnecting in {backoff}s", quiet=quiet, level="warn")
             time.sleep(backoff)
         finally:
             response.close()

@@ -1,13 +1,14 @@
 import click
 import yaml
 
-from squarepeg import __version__
+from squarepeg import __version__, ui
 from squarepeg.config import coerce_bool, coerce_int, load_effective_config, select_profile
 from squarepeg.dockerargs import check_supported_image, parse_env_entries, reject_unsupported
 from squarepeg.errors import SquarepegError, UsageError
 from squarepeg.k8s.dryrun import server_dry_run
 from squarepeg.k8s.runner import run_manifest
 from squarepeg.k8s.session import Session
+from squarepeg.log import chatter
 from squarepeg.manifest import build_job, build_pod
 from squarepeg.naming import generate_name, validate_rfc1123
 from squarepeg.quantities import docker_cpus_to_k8s, docker_memory_to_k8s
@@ -110,6 +111,7 @@ def cli():
 )
 @click.option("--timeout", "timeout", type=int, default=None)
 @click.option("--quiet", "quiet", is_flag=True)
+@click.option("--no-color", "no_color", is_flag=True, help="disable colour/animation in squarepeg's own stderr output")
 @click.option("--context", "context", default=None, help="kubeconfig context to use")
 @click.option("--container-name", "container_name", default="main")
 @click.argument("image")
@@ -142,12 +144,14 @@ def run(
     profile,
     timeout,
     quiet,
+    no_color,
     context,
     container_name,
     image,
     command,
 ):
     """Run IMAGE [COMMAND...] as a Kubernetes Pod or Job."""
+    ui.set_color_override(False if no_color else None)
     check_supported_image(image)
     if rm_flag and keep:
         raise UsageError("--rm and --keep are mutually exclusive")
@@ -255,11 +259,14 @@ def run(
         if not interactive:
             # some clusters reject tty=true with stdin=false; -i is accepted but never
             # forwards real stdin, so this can hang a container that then blocks reading it.
-            click.echo(
-                "squarepeg: -t implies stdin is opened on the container (stdinOnce), but stdin is "
+            # This is a real hazard warning, so it's deliberately never suppressed by
+            # --quiet (quiet=False below), unlike squarepeg's other informational chatter.
+            chatter(
+                "-t implies stdin is opened on the container (stdinOnce), but stdin is "
                 "never actually forwarded; a process that blocks reading stdin will hang. Pass -i "
                 "explicitly to acknowledge this.",
-                err=True,
+                quiet=False,
+                level="warn",
             )
             interactive = True
     if interactive:
@@ -311,21 +318,38 @@ def run(
     raise SystemExit(exit_code)
 
 
-@cli.group("config")
-def config_group():
-    """Inspect the resolved config."""
+def _print_config(config_paths, no_default_config, profile):
+    resolved_config, sources = _resolve_config(config_paths, no_default_config, profile)
+    for path, origin in sources:
+        chatter(f"{path} ({origin})", level="info")
+    if not sources:
+        chatter("no config files loaded", level="info")
+    click.echo(yaml.safe_dump(resolved_config, sort_keys=False), nl=False)
+
+
+@cli.group("config", invoke_without_command=True)
+@_add_config_options
+@click.pass_context
+def config_group(ctx, config_paths, no_default_config, profile):
+    """Inspect the resolved config (same as 'config show')."""
+    if ctx.invoked_subcommand is None:
+        _print_config(config_paths, no_default_config, profile)
+        return
+    default_map = {}
+    if config_paths:
+        default_map["config_paths"] = config_paths
+    if no_default_config:
+        default_map["no_default_config"] = no_default_config
+    if profile is not None:
+        default_map["profile"] = profile
+    ctx.default_map = {"show": default_map}
 
 
 @config_group.command("show")
 @_add_config_options
 def config_show(config_paths, no_default_config, profile):
-    """Print the merged effective config (stdout) and its sources (stderr)."""
-    resolved_config, sources = _resolve_config(config_paths, no_default_config, profile)
-    for path, origin in sources:
-        click.echo(f"[squarepeg] {path} ({origin})", err=True)
-    if not sources:
-        click.echo("[squarepeg] no config files loaded", err=True)
-    click.echo(yaml.safe_dump(resolved_config, sort_keys=False), nl=False)
+    """Print the merged effective config (stdout) and its sources (stderr). Same as bare 'config'."""
+    _print_config(config_paths, no_default_config, profile)
 
 
 def main():
@@ -337,7 +361,7 @@ def main():
     except click.exceptions.Exit as exc:
         raise SystemExit(exc.exit_code) from exc
     except SquarepegError as exc:
-        click.echo(f"squarepeg: {exc}", err=True)
+        click.echo(click.style(f"squarepeg: {exc}", fg="red", bold=True), err=True, color=ui.color_enabled())
         raise SystemExit(exc.exit_code) from exc
 
 
