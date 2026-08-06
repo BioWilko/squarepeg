@@ -22,9 +22,9 @@ from squarepeg.runspec import RunSpec
 # kept as module-level aliases: existing callers/tests referencing these names still work
 _wrap_api_exception = wrap_api_exception
 
-# how long a single watch call may block waiting for the pod to become terminal,
-# once it has already started; the loop simply re-watches if this elapses.
-TERMINAL_WATCH_POLL_SECONDS = 3600
+# how long a single watch call may block waiting for the pod to become terminal, once it
+# has already started; the loop simply re-watches if this elapses.
+TERMINAL_WATCH_POLL_SECONDS = 5
 
 
 def create_resource(session, spec: RunSpec, manifest: dict) -> None:
@@ -49,13 +49,17 @@ def discover_job_pod(session, job_name: str, timeout: int) -> str:
         ):
             return event["object"].metadata.name
     except ApiException as exc:
-        raise _wrap_api_exception(exc, f"failed to watch for the pod created by job {job_name!r}") from exc
+        raise _wrap_api_exception(
+            exc, f"failed to watch for the pod created by job {job_name!r}"
+        ) from exc
     finally:
         watcher.stop()
     raise RunnerError(f"timed out waiting for job {job_name!r} to create a pod")
 
 
-def wait_until_running_or_terminal(session, pod_name: str, timeout: int, *, quiet: bool = False) -> str:
+def wait_until_running_or_terminal(
+    session, pod_name: str, timeout: int, *, quiet: bool = False
+) -> str:
     """Wait until the pod is Running/Succeeded/Failed, or fail fast on a known-bad waiting reason.
 
     This bounds only the *startup* window (image pull, scheduling, container create); once the
@@ -82,17 +86,23 @@ def _watch_for_start(session, pod_name: str, timeout: int) -> str:
             for cs in pod.status.container_statuses or []:
                 waiting = cs.state.waiting
                 if waiting is not None and waiting.reason in FAIL_FAST_REASONS:
-                    raise RunnerError(f"container failed to start ({waiting.reason}): {waiting.message}")
+                    raise RunnerError(
+                        f"container failed to start ({waiting.reason}): {waiting.message}"
+                    )
             if phase in ("Running", "Succeeded", "Failed"):
                 return phase
     except ApiException as exc:
         raise _wrap_api_exception(exc, f"failed to watch pod {pod_name!r}") from exc
     finally:
         watcher.stop()
-    raise RunnerError(f"timed out after {timeout}s waiting for pod {pod_name!r} to start")
+    raise RunnerError(
+        f"timed out after {timeout}s waiting for pod {pod_name!r} to start"
+    )
 
 
-def wait_for_terminal(session, pod_name: str, stop_event: threading.Event) -> str | None:
+def wait_for_terminal(
+    session, pod_name: str, stop_event: threading.Event
+) -> str | None:
     """Wait, with no overall timeout, until the pod is Succeeded/Failed, or stop_event is set."""
     while not stop_event.is_set():
         watcher = watch.Watch()
@@ -116,7 +126,9 @@ def wait_for_terminal(session, pod_name: str, stop_event: threading.Event) -> st
     return None
 
 
-def extract_exit_code(session, pod_name: str, container_name: str) -> tuple[int, str | None]:
+def extract_exit_code(
+    session, pod_name: str, container_name: str
+) -> tuple[int, str | None]:
     try:
         pod = session.core.read_namespaced_pod(pod_name, session.namespace)
     except ApiException as exc:
@@ -168,7 +180,9 @@ class _InterruptHandler:
                 level="warn",
             )
         else:
-            chatter(f"leaving {self.mode} {self.name!r} running", quiet=False, level="warn")
+            chatter(
+                f"leaving {self.mode} {self.name!r} running", quiet=False, level="warn"
+            )
 
     @property
     def interrupted(self) -> bool:
@@ -186,7 +200,10 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
     with _InterruptHandler(name, spec.mode, spec.quiet) as handler:
         log_thread = None
         try:
-            with ui.Status(f"creating {spec.mode} {name!r} in namespace {session.namespace!r}", quiet=spec.quiet):
+            with ui.Status(
+                f"creating {spec.mode} {name!r} in namespace {session.namespace!r}",
+                quiet=spec.quiet,
+            ):
                 create_resource(session, spec, manifest)
 
             if spec.mode == "job":
@@ -207,7 +224,9 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
                 slow_after=20,
                 spinner_delay=0.0,
             ):
-                phase = wait_until_running_or_terminal(session, pod_name, spec.timeout, quiet=spec.quiet)
+                phase = wait_until_running_or_terminal(
+                    session, pod_name, spec.timeout, quiet=spec.quiet
+                )
 
             chatter(
                 f"streaming logs from pod {pod_name!r} (waiting for it to finish; Ctrl+C to stop)",
@@ -243,9 +262,15 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
             if handler.interrupted:
                 raise InterruptError(f"interrupted while running {spec.mode} {name!r}")
 
-            exit_code, reason = extract_exit_code(session, pod_name, spec.container_name)
+            exit_code, reason = extract_exit_code(
+                session, pod_name, spec.container_name
+            )
             if reason == "OOMKilled":
-                chatter(f"container was OOMKilled (exit code {exit_code})", quiet=spec.quiet, level="error")
+                chatter(
+                    f"container was OOMKilled (exit code {exit_code})",
+                    quiet=spec.quiet,
+                    level="error",
+                )
             return exit_code
         finally:
             handler.stop_event.set()
@@ -261,9 +286,16 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
                     level="warn",
                 )
             if spec.orphan_sweep and not handler.abandoned:
-                own_run_id = manifest.get("metadata", {}).get("labels", {}).get(RUN_ID_LABEL)
+                own_run_id = (
+                    manifest.get("metadata", {}).get("labels", {}).get(RUN_ID_LABEL)
+                )
                 try:
-                    with ui.Status("sweeping orphaned resources from previous runs", quiet=spec.quiet):
+                    with ui.Status(
+                        "sweeping orphaned resources from previous runs",
+                        quiet=spec.quiet,
+                    ):
                         sweep_orphans(session, spec, exclude_run_id=own_run_id)
                 except Exception as exc:
-                    chatter(f"orphan sweep skipped: {exc}", quiet=spec.quiet, level="warn")
+                    chatter(
+                        f"orphan sweep skipped: {exc}", quiet=spec.quiet, level="warn"
+                    )
