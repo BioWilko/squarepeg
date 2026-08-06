@@ -8,6 +8,7 @@ import threading
 from kubernetes import watch
 from kubernetes.client.rest import ApiException
 
+from squarepeg import ui
 from squarepeg.errors import InterruptError, RunnerError
 from squarepeg.k8s.apierrors import delete_resource, wrap_api_exception
 from squarepeg.k8s.events import print_pod_events
@@ -164,9 +165,10 @@ class _InterruptHandler:
             chatter(
                 f"interrupted; cleaning up {self.mode} {self.name!r} (press Ctrl+C again to leave it running)",
                 quiet=self.quiet,
+                level="warn",
             )
         else:
-            chatter(f"leaving {self.mode} {self.name!r} running", quiet=False)
+            chatter(f"leaving {self.mode} {self.name!r} running", quiet=False, level="warn")
 
     @property
     def interrupted(self) -> bool:
@@ -184,10 +186,34 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
     with _InterruptHandler(name, spec.mode, spec.quiet) as handler:
         log_thread = None
         try:
-            create_resource(session, spec, manifest)
-            pod_name = discover_job_pod(session, name, spec.timeout) if spec.mode == "job" else name
+            with ui.Status(f"creating {spec.mode} {name!r} in namespace {session.namespace!r}", quiet=spec.quiet):
+                create_resource(session, spec, manifest)
 
-            phase = wait_until_running_or_terminal(session, pod_name, spec.timeout, quiet=spec.quiet)
+            if spec.mode == "job":
+                with ui.Status(
+                    f"waiting for job {name!r} to create a pod",
+                    quiet=spec.quiet,
+                    slow_hint="the job controller has not produced a pod yet",
+                    slow_after=15,
+                ):
+                    pod_name = discover_job_pod(session, name, spec.timeout)
+            else:
+                pod_name = name
+
+            with ui.Status(
+                f"waiting for pod {pod_name!r} to start",
+                quiet=spec.quiet,
+                slow_hint="still scheduling or pulling the image; a cold pull of a large image can take a while",
+                slow_after=20,
+                spinner_delay=0.0,
+            ):
+                phase = wait_until_running_or_terminal(session, pod_name, spec.timeout, quiet=spec.quiet)
+
+            chatter(
+                f"streaming logs from pod {pod_name!r} (waiting for it to finish; Ctrl+C to stop)",
+                quiet=spec.quiet,
+                level="step",
+            )
 
             log_thread = threading.Thread(
                 target=stream_logs,
@@ -206,7 +232,11 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
             # truncate output for fast-exiting containers.
             log_thread.join(timeout=30)
             if log_thread.is_alive():
-                chatter(f"log stream for pod {pod_name!r} did not finish on its own; stopping it", quiet=spec.quiet)
+                chatter(
+                    f"log stream for pod {pod_name!r} did not finish on its own; stopping it",
+                    quiet=spec.quiet,
+                    level="warn",
+                )
                 handler.stop_event.set()
                 log_thread.join(timeout=5)
 
@@ -215,19 +245,25 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
 
             exit_code, reason = extract_exit_code(session, pod_name, spec.container_name)
             if reason == "OOMKilled":
-                chatter(f"container was OOMKilled (exit code {exit_code})", quiet=spec.quiet)
+                chatter(f"container was OOMKilled (exit code {exit_code})", quiet=spec.quiet, level="error")
             return exit_code
         finally:
             handler.stop_event.set()
             if log_thread is not None:
                 log_thread.join(timeout=2)
             if spec.cleanup and not handler.abandoned:
-                cleanup(session, spec, name)
+                with ui.Status(f"deleting {spec.mode} {name!r}", quiet=spec.quiet):
+                    cleanup(session, spec, name)
             elif not handler.abandoned and not spec.quiet:
-                chatter(f"kept {spec.mode} {name!r}; inspect with 'kubectl describe {spec.mode} {name}'", quiet=False)
+                chatter(
+                    f"kept {spec.mode} {name!r}; inspect with 'kubectl describe {spec.mode} {name}'",
+                    quiet=False,
+                    level="warn",
+                )
             if spec.orphan_sweep and not handler.abandoned:
                 own_run_id = manifest.get("metadata", {}).get("labels", {}).get(RUN_ID_LABEL)
                 try:
-                    sweep_orphans(session, spec, exclude_run_id=own_run_id)
+                    with ui.Status("sweeping orphaned resources from previous runs", quiet=spec.quiet):
+                        sweep_orphans(session, spec, exclude_run_id=own_run_id)
                 except Exception as exc:
-                    chatter(f"orphan sweep skipped: {exc}", quiet=spec.quiet)
+                    chatter(f"orphan sweep skipped: {exc}", quiet=spec.quiet, level="warn")

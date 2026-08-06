@@ -16,4 +16,4 @@ def print_pod_events(session, pod_name: str, *, quiet: bool = False) -> None:
         return  # best-effort diagnostics; never fail the run because event listing failed
 
     for event in events.items or []:
-        chatter(f"{pod_name}: {event.reason}: {event.message}", quiet=quiet)
+        chatter(f"{pod_name}: {event.reason}: {event.message}", quiet=quiet, level="detail")

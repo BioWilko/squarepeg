@@ -1,13 +1,23 @@
 import click
 import yaml
 
-from squarepeg import __version__
-from squarepeg.config import coerce_bool, coerce_int, load_effective_config, select_profile
-from squarepeg.dockerargs import check_supported_image, parse_env_entries, reject_unsupported
+from squarepeg import __version__, ui
+from squarepeg.config import (
+    coerce_bool,
+    coerce_int,
+    load_effective_config,
+    select_profile,
+)
+from squarepeg.dockerargs import (
+    check_supported_image,
+    parse_env_entries,
+    reject_unsupported,
+)
 from squarepeg.errors import SquarepegError, UsageError
 from squarepeg.k8s.dryrun import server_dry_run
 from squarepeg.k8s.runner import run_manifest
 from squarepeg.k8s.session import Session
+from squarepeg.log import chatter
 from squarepeg.manifest import build_job, build_pod
 from squarepeg.naming import generate_name, validate_rfc1123
 from squarepeg.quantities import docker_cpus_to_k8s, docker_memory_to_k8s
@@ -16,7 +26,11 @@ from squarepeg.volumes import auto_mounts_from_config, parse_volume_flag
 
 _CONFIG_OPTIONS = [
     click.option(
-        "--config", "config_paths", multiple=True, type=click.Path(), help="repeatable, layered left-to-right"
+        "--config",
+        "config_paths",
+        multiple=True,
+        type=click.Path(),
+        help="repeatable, layered left-to-right",
     ),
     click.option("--no-default-config", "no_default_config", is_flag=True),
     click.option("--profile", "profile", default=None),
@@ -30,7 +44,9 @@ def _add_config_options(cmd):
 
 
 def _resolve_config(config_paths, no_default_config, profile):
-    effective, sources = load_effective_config(config_paths, no_default_config=no_default_config)
+    effective, sources = load_effective_config(
+        config_paths, no_default_config=no_default_config
+    )
     resolved = select_profile(effective, profile)
     return resolved, sources
 
@@ -74,7 +90,24 @@ def _add_unsupported_options(cmd):
     return cmd
 
 
-@click.group()
+_LOGO = r"""
+   _____                                             
+  / ___/____ ___  ______ _________  ____  ___  ____ _
+  \__ \/ __ `/ / / / __ `/ ___/ _ \/ __ \/ _ \/ __ `/
+ ___/ / /_/ / /_/ / /_/ / /  /  __/ /_/ /  __/ /_/ / 
+/____/\__, /\__,_/\__,_/_/   \___/ .___/\___/\__, /  
+        /_/                     /_/         /____/   
+""".strip("\n")
+
+class _LogoGroup(click.Group):
+    """Prints the ASCII logo above the 'Usage:' line, rather than as part of the help body."""
+
+    def format_usage(self, ctx, formatter):
+        formatter.write(_LOGO + "\n\n")
+        super().format_usage(ctx, formatter)
+
+
+@click.group(cls=_LogoGroup)
 @click.version_option(__version__, prog_name="squarepeg")
 def cli():
     """Run a docker-run-style command as a Kubernetes Pod or Job."""
@@ -84,14 +117,38 @@ def cli():
     context_settings={"allow_interspersed_args": False, "ignore_unknown_options": True},
 )
 @click.option("-e", "--env", "env_entries", multiple=True, help="KEY=VALUE, repeatable")
-@click.option("-v", "--volume", "volume_entries", multiple=True, help="[NAME|/host]:/container[:ro|rw], repeatable")
+@click.option(
+    "-v",
+    "--volume",
+    "volume_entries",
+    multiple=True,
+    help="[NAME|/host]:/container[:ro|rw], repeatable",
+)
 @click.option("--name", "name", default=None, help="Pod/Job name")
 @click.option("-w", "--workdir", "workdir", default=None)
-@click.option("--entrypoint", "entrypoint", default=None, help="Override the image ENTRYPOINT (-> k8s 'command')")
-@click.option("-i", "--interactive", "interactive", is_flag=True, help="accepted; stdin is not forwarded")
+@click.option(
+    "--entrypoint",
+    "entrypoint",
+    default=None,
+    help="Override the image ENTRYPOINT (-> k8s 'command')",
+)
+@click.option(
+    "-i",
+    "--interactive",
+    "interactive",
+    is_flag=True,
+    help="accepted; stdin is not forwarded",
+)
 @click.option("-t", "--tty", "tty", is_flag=True)
-@click.option("--rm", "rm_flag", is_flag=True, help="accepted no-op; cleanup is already the default")
-@click.option("--pull", "pull", type=click.Choice(["always", "missing", "never"]), default=None)
+@click.option(
+    "--rm",
+    "rm_flag",
+    is_flag=True,
+    help="accepted no-op; cleanup is already the default",
+)
+@click.option(
+    "--pull", "pull", type=click.Choice(["always", "missing", "never"]), default=None
+)
 @click.option("--cpus", "cpus", default=None)
 @click.option("-m", "--memory", "memory", default=None)
 @click.option("--request-cpu", "request_cpu", default=None)
@@ -100,8 +157,12 @@ def cli():
 @click.option("--limit-memory", "limit_memory", default=None)
 @click.option("--mode", "mode", type=click.Choice(["pod", "job"]), default=None)
 @click.option("-n", "--namespace", "namespace", default=None)
-@click.option("--keep", "keep", is_flag=True, help="do not delete the pod/job after it finishes")
-@click.option("--dry-run", "dry_run", is_flag=True, help="render the manifest without creating it")
+@click.option(
+    "--keep", "keep", is_flag=True, help="do not delete the pod/job after it finishes"
+)
+@click.option(
+    "--dry-run", "dry_run", is_flag=True, help="render the manifest without creating it"
+)
 @click.option(
     "--dry-run-server",
     "dry_run_server",
@@ -110,6 +171,12 @@ def cli():
 )
 @click.option("--timeout", "timeout", type=int, default=None)
 @click.option("--quiet", "quiet", is_flag=True)
+@click.option(
+    "--no-color",
+    "no_color",
+    is_flag=True,
+    help="disable colour/animation in squarepeg's own stderr output",
+)
 @click.option("--context", "context", default=None, help="kubeconfig context to use")
 @click.option("--container-name", "container_name", default="main")
 @click.argument("image")
@@ -142,22 +209,28 @@ def run(
     profile,
     timeout,
     quiet,
+    no_color,
     context,
     container_name,
     image,
     command,
 ):
     """Run IMAGE [COMMAND...] as a Kubernetes Pod or Job."""
+    ui.set_color_override(False if no_color else None)
     check_supported_image(image)
     if rm_flag and keep:
         raise UsageError("--rm and --keep are mutually exclusive")
     if dry_run and dry_run_server:
         raise UsageError("--dry-run and --dry-run-server are mutually exclusive")
 
-    resolved_config, _sources = _resolve_config(config_paths, no_default_config, profile)
+    resolved_config, _sources = _resolve_config(
+        config_paths, no_default_config, profile
+    )
     config_defaults = resolved_config.get("defaults") or {}
     config_volumes = resolved_config.get("volumes") or {}
-    allow_host_path_mounts = coerce_bool(resolved_config.get("allow_host_path_mounts", False), "allow_host_path_mounts")
+    allow_host_path_mounts = coerce_bool(
+        resolved_config.get("allow_host_path_mounts", False), "allow_host_path_mounts"
+    )
 
     claims: set[str] = set()
 
@@ -166,12 +239,18 @@ def run(
         claims.add(f"/spec/containers/[name={container_name}]/env/[name={key}]")
 
     cli_volumes = [
-        parse_volume_flag(v, config_volumes=config_volumes, allow_host_path_mounts=allow_host_path_mounts)
+        parse_volume_flag(
+            v,
+            config_volumes=config_volumes,
+            allow_host_path_mounts=allow_host_path_mounts,
+        )
         for v in volume_entries
     ]
     for vol in cli_volumes:
         claims.add(f"/spec/volumes/[name={vol.volume_name}]")
-        claims.add(f"/spec/containers/[name={container_name}]/volumeMounts/[name={vol.volume_name}]")
+        claims.add(
+            f"/spec/containers/[name={container_name}]/volumeMounts/[name={vol.volume_name}]"
+        )
 
     # config-declared auto-mounts (volumes.NAME with a mount_path) are not claimed -- they're
     # config-driven, not CLI-driven, so kubernetes.spec passthrough in the same config can still
@@ -200,7 +279,9 @@ def run(
         claims.add(f"/spec/containers/[name={container_name}]/resources/limits/cpu")
     if request_memory is not None:
         resources.request_memory = request_memory
-        claims.add(f"/spec/containers/[name={container_name}]/resources/requests/memory")
+        claims.add(
+            f"/spec/containers/[name={container_name}]/resources/requests/memory"
+        )
     if limit_memory is not None:
         resources.limit_memory = limit_memory
         claims.add(f"/spec/containers/[name={container_name}]/resources/limits/memory")
@@ -209,7 +290,9 @@ def run(
     if cli_set_cpus and limit_cpu is None:
         claims.add(f"/spec/containers/[name={container_name}]/resources/limits/cpu")
     if cli_set_memory and request_memory is None:
-        claims.add(f"/spec/containers/[name={container_name}]/resources/requests/memory")
+        claims.add(
+            f"/spec/containers/[name={container_name}]/resources/requests/memory"
+        )
     if cli_set_memory and limit_memory is None:
         claims.add(f"/spec/containers/[name={container_name}]/resources/limits/memory")
 
@@ -224,7 +307,11 @@ def run(
     else:
         namespace = resolved_config.get("namespace")
 
-    pull_policy = {"always": "Always", "missing": "IfNotPresent", "never": "Never"}.get(pull) if pull else None
+    pull_policy = (
+        {"always": "Always", "missing": "IfNotPresent", "never": "Never"}.get(pull)
+        if pull
+        else None
+    )
     if pull_policy is not None:
         claims.add(f"/spec/containers/[name={container_name}]/imagePullPolicy")
     elif "image_pull_policy" in config_defaults:
@@ -236,13 +323,25 @@ def run(
         workdir = config_defaults["workdir"]
 
     mode = mode or resolved_config.get("mode", "pod")
-    timeout = timeout if timeout is not None else coerce_int(resolved_config.get("timeout", 300), "timeout")
+    timeout = (
+        timeout
+        if timeout is not None
+        else coerce_int(resolved_config.get("timeout", 300), "timeout")
+    )
     quiet = quiet or coerce_bool(resolved_config.get("quiet", False), "quiet")
-    cleanup = False if keep else coerce_bool(resolved_config.get("cleanup", True), "cleanup")
-    orphan_sweep = coerce_bool(resolved_config.get("orphan_sweep", True), "orphan_sweep")
-    orphan_sweep_min_age = coerce_int(resolved_config.get("orphan_sweep_min_age", 300), "orphan_sweep_min_age")
+    cleanup = (
+        False if keep else coerce_bool(resolved_config.get("cleanup", True), "cleanup")
+    )
+    orphan_sweep = coerce_bool(
+        resolved_config.get("orphan_sweep", True), "orphan_sweep"
+    )
+    orphan_sweep_min_age = coerce_int(
+        resolved_config.get("orphan_sweep_min_age", 300), "orphan_sweep_min_age"
+    )
     if orphan_sweep_min_age < 0:
-        raise UsageError(f"'orphan_sweep_min_age' must not be negative, got {orphan_sweep_min_age}")
+        raise UsageError(
+            f"'orphan_sweep_min_age' must not be negative, got {orphan_sweep_min_age}"
+        )
 
     entrypoint_tuple = (entrypoint,) if entrypoint is not None else None
     if entrypoint_tuple is not None:
@@ -255,11 +354,14 @@ def run(
         if not interactive:
             # some clusters reject tty=true with stdin=false; -i is accepted but never
             # forwards real stdin, so this can hang a container that then blocks reading it.
-            click.echo(
-                "squarepeg: -t implies stdin is opened on the container (stdinOnce), but stdin is "
+            # This is a real hazard warning, so it's deliberately never suppressed by
+            # --quiet (quiet=False below), unlike squarepeg's other informational chatter.
+            chatter(
+                "-t implies stdin is opened on the container (stdinOnce), but stdin is "
                 "never actually forwarded; a process that blocks reading stdin will hang. Pass -i "
                 "explicitly to acknowledge this.",
-                err=True,
+                quiet=False,
+                level="warn",
             )
             interactive = True
     if interactive:
@@ -311,21 +413,38 @@ def run(
     raise SystemExit(exit_code)
 
 
-@cli.group("config")
-def config_group():
-    """Inspect the resolved config."""
+def _print_config(config_paths, no_default_config, profile):
+    resolved_config, sources = _resolve_config(config_paths, no_default_config, profile)
+    for path, origin in sources:
+        chatter(f"{path} ({origin})", level="info")
+    if not sources:
+        chatter("no config files loaded", level="info")
+    click.echo(yaml.safe_dump(resolved_config, sort_keys=False), nl=False)
+
+
+@cli.group("config", invoke_without_command=True)
+@_add_config_options
+@click.pass_context
+def config_group(ctx, config_paths, no_default_config, profile):
+    """Inspect the resolved config (same as 'config show')."""
+    if ctx.invoked_subcommand is None:
+        _print_config(config_paths, no_default_config, profile)
+        return
+    default_map = {}
+    if config_paths:
+        default_map["config_paths"] = config_paths
+    if no_default_config:
+        default_map["no_default_config"] = no_default_config
+    if profile is not None:
+        default_map["profile"] = profile
+    ctx.default_map = {"show": default_map}
 
 
 @config_group.command("show")
 @_add_config_options
 def config_show(config_paths, no_default_config, profile):
-    """Print the merged effective config (stdout) and its sources (stderr)."""
-    resolved_config, sources = _resolve_config(config_paths, no_default_config, profile)
-    for path, origin in sources:
-        click.echo(f"[squarepeg] {path} ({origin})", err=True)
-    if not sources:
-        click.echo("[squarepeg] no config files loaded", err=True)
-    click.echo(yaml.safe_dump(resolved_config, sort_keys=False), nl=False)
+    """Print the merged effective config (stdout) and its sources (stderr). Same as bare 'config'."""
+    _print_config(config_paths, no_default_config, profile)
 
 
 def main():
@@ -337,7 +456,11 @@ def main():
     except click.exceptions.Exit as exc:
         raise SystemExit(exc.exit_code) from exc
     except SquarepegError as exc:
-        click.echo(f"squarepeg: {exc}", err=True)
+        click.echo(
+            click.style(f"squarepeg: {exc}", fg="red", bold=True),
+            err=True,
+            color=ui.color_enabled(),
+        )
         raise SystemExit(exc.exit_code) from exc
 
 

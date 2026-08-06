@@ -191,8 +191,8 @@ def sweep_orphans(
             if delete_resource(session, kind, name):
                 deleted += 1
         except Exception as exc:  # one bad delete must not abort the rest of the sweep
-            chatter(f"orphan sweep: failed to delete {kind} {name!r}: {exc}", quiet=spec.quiet)
+            chatter(f"orphan sweep: failed to delete {kind} {name!r}: {exc}", quiet=spec.quiet, level="warn")
 
     if deleted:
-        chatter(f"swept {deleted} orphaned resource(s) from previous runs", quiet=spec.quiet)
+        chatter(f"swept {deleted} orphaned resource(s) from previous runs", quiet=spec.quiet, level="success")
     return deleted
