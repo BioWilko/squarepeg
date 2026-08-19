@@ -10,6 +10,12 @@ those call sites needed to change.
 Colour/animation precedence (highest first): --quiet (nothing at all) > --no-color
 (forces colour off) > $NO_COLOR (forces colour off) > $FORCE_COLOR (forces colour on) >
 autodetect from sys.stderr.isatty() (click's own default behaviour).
+
+When a run is in progress, the prefix also carries that run's id -- `[squarepeg:1a2b3c4]
+...` -- so that several `squarepeg run` invocations whose stderr gets interleaved (parallel
+shell jobs, a CI matrix, an aggregated log) stay attributable line by line. The tag lives
+strictly in the prefix span, never inside the message body, so it can never break a test
+asserting a message body is a contiguous substring of the output.
 """
 
 import itertools
@@ -42,11 +48,31 @@ _ACTIVE: "Status | None" = None
 
 _color_override: bool | None = None  # None = no override, resolved from env/TTY instead
 
+_run_tag: str | None = None  # None = no run associated with current output (config, pre-run errors)
+
 
 def set_color_override(value: bool | None) -> None:
     """Called once from cli.run() for --no-color. None restores auto-detection."""
     global _color_override
     _color_override = value
+
+
+def set_run_tag(tag: str | None) -> None:
+    """Set the run id shown in every subsequent status line's prefix. None (the default,
+    and what cli.py's `config` command resets it to) means no run is associated with the
+    current output, producing the legacy plain `[squarepeg] ` prefix.
+
+    Written exactly once per real run, on the main thread, before any thread that reads it
+    (the log-streaming thread, a Status spinner thread) is created -- threading.Thread.start()
+    establishes a happens-before edge, so no lock is needed for readers. The signal handler in
+    _InterruptHandler also only reads this value, which is what makes it signal-handler-safe
+    to read (acquiring a lock there would not be)."""
+    global _run_tag
+    _run_tag = tag
+
+
+def current_run_tag() -> str | None:
+    return _run_tag
 
 
 def color_enabled() -> bool | None:
@@ -79,7 +105,9 @@ def _spinner_frames() -> list[str]:
 
 
 def _styled_line(message: str, level: Level) -> str:
-    prefix = click.style("[squarepeg] ", dim=True)
+    tag = current_run_tag()
+    label = f"[squarepeg:{tag}] " if tag else "[squarepeg] "
+    prefix = click.style(label, dim=True)
     body = click.style(message, **_STYLES[level])
     return prefix + body
 

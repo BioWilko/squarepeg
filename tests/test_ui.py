@@ -8,10 +8,12 @@ LEVELS = ["info", "step", "wait", "success", "warn", "error", "detail"]
 
 
 @pytest.fixture(autouse=True)
-def _reset_color_override():
+def _reset_ui_state():
     ui.set_color_override(None)
+    ui.set_run_tag(None)
     yield
     ui.set_color_override(None)
+    ui.set_run_tag(None)
 
 
 # --- emit: colour / env var precedence ---
@@ -108,3 +110,54 @@ def test_status_propagates_exceptions_and_leaves_no_live_thread():
         with ui.Status("doing a thing"):
             raise RunnerError("boom")
     assert threading.active_count() == before
+
+
+# --- run tag ---
+
+
+def test_set_run_tag_appears_in_prefix(capsys):
+    ui.set_run_tag("abc12345")
+    ui.emit("hello")
+    assert "[squarepeg:abc12345] hello" in capsys.readouterr().err
+
+
+def test_no_run_tag_produces_legacy_prefix(capsys):
+    ui.emit("hello")
+    err = capsys.readouterr().err
+    assert err.strip() == "[squarepeg] hello"
+    assert "[squarepeg:" not in err
+
+
+@pytest.mark.parametrize("level", LEVELS)
+def test_run_tag_does_not_corrupt_body_substring(monkeypatch, capsys, level):
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    ui.set_run_tag("abc12345")
+    ui.emit("swept 3 orphaned resource(s) from previous runs", level=level)
+    assert "swept 3 orphaned resource(s) from previous runs" in capsys.readouterr().err
+
+
+def test_status_line_carries_run_tag(capsys):
+    ui.set_run_tag("abc12345")
+    with ui.Status("waiting for pod to start", slow_hint="still pulling", slow_after=999):
+        pass
+    err = capsys.readouterr().err
+    assert "[squarepeg:abc12345]" in err
+    assert "waiting for pod to start" in err
+    assert "still pulling" in err
+
+
+def test_status_success_line_carries_run_tag(capsys):
+    ui.set_run_tag("abc12345")
+    with ui.Status("doing a thing", success="all done"):
+        pass
+    err = capsys.readouterr().err
+    assert "[squarepeg:abc12345] all done" in err
+
+
+def test_set_run_tag_none_clears_a_previously_set_tag(capsys):
+    ui.set_run_tag("abc12345")
+    ui.set_run_tag(None)
+    ui.emit("hello")
+    err = capsys.readouterr().err
+    assert "[squarepeg:" not in err
+    assert "[squarepeg] hello" in err
