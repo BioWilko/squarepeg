@@ -449,7 +449,7 @@ def test_run_manifest_passes_own_run_id_to_exclude(monkeypatch):
     monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Succeeded")}]))
     captured = {}
 
-    def fake_sweep(_session, _spec, *, exclude_run_id=None):
+    def fake_sweep(_session, _min_age, *, quiet=False, exclude_run_id=None):
         captured["exclude_run_id"] = exclude_run_id
         return 0
 

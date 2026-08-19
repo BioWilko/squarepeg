@@ -15,8 +15,9 @@ from squarepeg.dockerargs import (
     parse_env_entries,
     reject_unsupported,
 )
-from squarepeg.errors import SquarepegError, UsageError
+from squarepeg.errors import RunnerError, SquarepegError, UsageError
 from squarepeg.k8s.dryrun import server_dry_run
+from squarepeg.k8s.orphans import DEFAULT_MIN_AGE_SECONDS, clean_orphans
 from squarepeg.k8s.runner import run_manifest
 from squarepeg.k8s.session import Session
 from squarepeg.labels import RUN_ID_LABEL
@@ -343,7 +344,7 @@ def run(
         resolved_config.get("orphan_sweep", True), "orphan_sweep"
     )
     orphan_sweep_min_age = coerce_int(
-        resolved_config.get("orphan_sweep_min_age", 300), "orphan_sweep_min_age"
+        resolved_config.get("orphan_sweep_min_age", DEFAULT_MIN_AGE_SECONDS), "orphan_sweep_min_age"
     )
     if orphan_sweep_min_age < 0:
         raise UsageError(
@@ -430,6 +431,97 @@ def run(
     spec.namespace = session.namespace
     exit_code = run_manifest(session, spec, manifest)
     raise SystemExit(exit_code)
+
+
+def _format_age(seconds: float) -> str:
+    """kubectl-style compact duration: the two largest non-zero units, e.g. '10m12s',
+    '3h14m', '2d4h'. Used only for --dry-run's human-readable listing."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{secs}s" if secs else f"{minutes}m"
+    hours, mins = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h{mins}m" if mins else f"{hours}h"
+    days, hrs = divmod(hours, 24)
+    return f"{days}d{hrs}h" if hrs else f"{days}d"
+
+
+def _candidate_detail(candidate) -> str:
+    age = _format_age(candidate.age_seconds)
+    if candidate.category == "terminal":
+        return f"finished {age} ago"
+    return f"{candidate.reason} for {age}"
+
+
+@cli.command("clean")
+@click.option("--dry-run", "dry_run", is_flag=True, help="list what would be deleted without deleting anything")
+@click.option(
+    "--min-age",
+    "min_age",
+    type=int,
+    default=None,
+    help="seconds a resource must be eligible before it's cleaned (default: config orphan_sweep_min_age, else 300)",
+)
+@click.option("-n", "--namespace", "namespace", default=None)
+@click.option("--context", "context", default=None, help="kubeconfig context to use")
+@click.option("--quiet", "quiet", is_flag=True)
+@click.option(
+    "--no-color",
+    "no_color",
+    is_flag=True,
+    help="disable colour/animation in squarepeg's own stderr output",
+)
+@_add_config_options
+def clean(dry_run, min_age, namespace, context, quiet, no_color, config_paths, no_default_config, profile):
+    """Delete this user's own orphaned Pods/Jobs left behind by crashed or killed runs.
+
+    Scoped to your own resources only (never a teammate's), and --keep'd resources are
+    always exempt -- there is no flag to override either. Runs regardless of the
+    'orphan_sweep' config key, which only affects the automatic per-run sweep. There is
+    no confirmation prompt: the candidates are, by construction, either already finished
+    or stuck and unable to start, so nothing running is ever at risk -- use --dry-run to
+    preview what would be deleted first if you want to check.
+    """
+    ui.set_color_override(False if no_color else None)
+    ui.set_run_tag(secrets.token_hex(4))
+
+    resolved_config, _sources = _resolve_config(config_paths, no_default_config, profile)
+
+    if namespace is None:
+        namespace = resolved_config.get("namespace")
+    quiet = quiet or coerce_bool(resolved_config.get("quiet", False), "quiet")
+
+    if min_age is None:
+        min_age = coerce_int(
+            resolved_config.get("orphan_sweep_min_age", DEFAULT_MIN_AGE_SECONDS), "orphan_sweep_min_age"
+        )
+        if min_age < 0:
+            raise UsageError(f"'orphan_sweep_min_age' must not be negative, got {min_age}")
+    elif min_age < 0:
+        raise UsageError(f"--min-age must not be negative, got {min_age}")
+
+    session = Session(namespace=namespace, context=context, quiet=quiet)
+
+    with ui.Status("scanning for orphaned resources", quiet=quiet):
+        result = clean_orphans(session, min_age, quiet=quiet, dry_run=dry_run)
+
+    if dry_run:
+        if result.candidates:
+            kind_name_width = max(len(f"{c.kind}/{c.name}") for c in result.candidates)
+            category_width = max(len(c.category) for c in result.candidates)
+            for c in result.candidates:
+                kind_name = f"{c.kind}/{c.name}".ljust(kind_name_width)
+                category = c.category.ljust(category_width)
+                click.echo(f"{kind_name}  {category}  {_candidate_detail(c)}")
+        return
+
+    if result.failed:
+        raise RunnerError(
+            f"failed to delete {len(result.failed)} of {len(result.candidates)} orphaned resource(s)"
+        )
 
 
 def _print_config(config_paths, no_default_config, profile):
