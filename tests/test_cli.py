@@ -7,6 +7,16 @@ from squarepeg.cli import cli
 from squarepeg.errors import RunnerError
 
 
+def _separated_runner():
+    """A CliRunner with stdout/stderr captured separately, across the click 8.1/8.2 API
+    split: 8.1.x needs mix_stderr=False to get a usable .stderr; 8.2+ removed that kwarg
+    entirely and always separates the two streams by default."""
+    try:
+        return CliRunner(mix_stderr=False)
+    except TypeError:
+        return CliRunner()
+
+
 class FakeSession:
     """Stands in for squarepeg.k8s.session.Session so CLI-level dry-run-server tests never
     touch a real cluster; records the args it was constructed with for assertions."""
@@ -367,3 +377,89 @@ def test_config_unknown_subcommand_errors():
     result = CliRunner().invoke(cli, ["config", "bogus"])
     assert result.exit_code != 0
     assert "No such command 'bogus'" in result.output
+
+
+# --- run-id tag ---
+
+
+def _mock_run(monkeypatch):
+    """Patches Session/run_manifest so 'run' never touches a cluster, and returns a dict
+    that gets filled in with the manifest run_manifest was actually handed."""
+    captured = {}
+    monkeypatch.setattr(cli_module, "Session", FakeSession)
+
+    def fake_run_manifest(session, spec, manifest):
+        captured["manifest"] = manifest
+        return 0
+
+    monkeypatch.setattr(cli_module, "run_manifest", fake_run_manifest)
+    return captured
+
+
+def test_run_stderr_tag_matches_manifest_run_id_label(monkeypatch):
+    """-t (without -i) triggers a real chatter() warning inside cli.py itself, before Session
+    is even constructed -- a guaranteed, already-existing status line to check the tag on."""
+    import re
+
+    captured = _mock_run(monkeypatch)
+    result = _separated_runner().invoke(cli, ["run", "--no-default-config", "-t", "alpine"])
+    assert result.exit_code == 0, result.output
+
+    label = captured["manifest"]["metadata"]["labels"]["squarepeg.io/run-id"]
+    assert re.fullmatch(r"[0-9a-f]{8}", label)
+    assert f"[squarepeg:{label}]" in result.stderr
+
+
+def test_run_job_mode_stderr_tag_matches_manifest_run_id_label(monkeypatch):
+    captured = _mock_run(monkeypatch)
+    result = _separated_runner().invoke(
+        cli, ["run", "--no-default-config", "--mode", "job", "-t", "alpine"]
+    )
+    assert result.exit_code == 0, result.output
+
+    label = captured["manifest"]["metadata"]["labels"]["squarepeg.io/run-id"]
+    assert f"[squarepeg:{label}]" in result.stderr
+
+
+def test_config_output_has_no_run_tag():
+    result = _separated_runner().invoke(cli, ["config", "--no-default-config"])
+    assert result.exit_code == 0, result.stderr
+    assert "[squarepeg:" not in result.stderr
+    assert "[squarepeg] no config files loaded" in result.stderr
+
+
+def test_config_after_run_has_no_run_tag(monkeypatch):
+    """A 'run' followed by 'config' in the same process (as CliRunner does) must not leak
+    the run's tag into config's output."""
+    _mock_run(monkeypatch)
+    _separated_runner().invoke(cli, ["run", "--no-default-config", "alpine"])
+    result = _separated_runner().invoke(cli, ["config", "--no-default-config"])
+    assert result.exit_code == 0, result.stderr
+    assert "[squarepeg:" not in result.stderr
+
+
+def test_dry_run_stdout_has_no_tag():
+    result = _separated_runner().invoke(cli, ["run", "--no-default-config", "--dry-run", "alpine"])
+    assert result.exit_code == 0, result.stderr
+    assert "[squarepeg" not in result.stdout
+
+
+def test_dry_run_server_stderr_is_tagged(monkeypatch):
+    monkeypatch.setattr(cli_module, "Session", FakeSession)
+    monkeypatch.setattr(cli_module, "server_dry_run", lambda session, spec, manifest: manifest)
+    result = _separated_runner().invoke(
+        cli, ["run", "--no-default-config", "-t", "--dry-run-server", "alpine"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "[squarepeg:" in result.stderr
+
+
+def test_two_run_invocations_get_different_tags(monkeypatch):
+    captured1 = _mock_run(monkeypatch)
+    CliRunner().invoke(cli, ["run", "--no-default-config", "alpine"])
+    captured2 = _mock_run(monkeypatch)
+    CliRunner().invoke(cli, ["run", "--no-default-config", "alpine"])
+
+    label1 = captured1["manifest"]["metadata"]["labels"]["squarepeg.io/run-id"]
+    label2 = captured2["manifest"]["metadata"]["labels"]["squarepeg.io/run-id"]
+    assert label1 != label2

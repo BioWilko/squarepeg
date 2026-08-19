@@ -5,7 +5,21 @@ import uuid
 
 import pytest
 
+from squarepeg import ui
+
 INTEGRATION_ENV_VAR = "SQUAREPEG_INTEGRATION"
+
+
+@pytest.fixture(autouse=True)
+def _reset_ui_globals():
+    """squarepeg.ui's colour override and run-tag are module-level globals, set once per
+    real invocation -- reset them around every test regardless of module/order, so a tag
+    set (or a colour override changed) in one test can never leak into another."""
+    ui.set_color_override(None)
+    ui.set_run_tag(None)
+    yield
+    ui.set_color_override(None)
+    ui.set_run_tag(None)
 
 
 @pytest.fixture(scope="session")

@@ -1,3 +1,5 @@
+import secrets
+
 import click
 import yaml
 
@@ -17,6 +19,7 @@ from squarepeg.errors import SquarepegError, UsageError
 from squarepeg.k8s.dryrun import server_dry_run
 from squarepeg.k8s.runner import run_manifest
 from squarepeg.k8s.session import Session
+from squarepeg.labels import RUN_ID_LABEL
 from squarepeg.log import chatter
 from squarepeg.manifest import build_job, build_pod
 from squarepeg.naming import generate_name, validate_rfc1123
@@ -217,6 +220,7 @@ def run(
 ):
     """Run IMAGE [COMMAND...] as a Kubernetes Pod or Job."""
     ui.set_color_override(False if no_color else None)
+    ui.set_run_tag(None)
     check_supported_image(image)
     if rm_flag and keep:
         raise UsageError("--rm and --keep are mutually exclusive")
@@ -301,6 +305,9 @@ def run(
         claims.add("/metadata/name")
     else:
         name = generate_name(image)
+
+    run_id = secrets.token_hex(4)
+    ui.set_run_tag(run_id)
 
     if namespace is not None:
         claims.add("/metadata/namespace")
@@ -393,9 +400,21 @@ def run(
     kubernetes_passthrough = resolved_config.get("kubernetes")
     job_passthrough = resolved_config.get("job")
     if spec.mode == "job":
-        manifest = build_job(spec, kubernetes_passthrough, job_passthrough)
+        manifest = build_job(spec, kubernetes_passthrough, job_passthrough, run_id=run_id)
     else:
-        manifest = build_pod(spec, kubernetes_passthrough)
+        manifest = build_pod(spec, kubernetes_passthrough, run_id=run_id)
+
+    # kubernetes.metadata passthrough can legally overwrite the run-id label (it's not a
+    # claimed field) -- if it did, the tag on screen must match what's actually on the
+    # cluster, not the value we generated, so the printed tag is always kubectl -l ready.
+    effective_run_id = manifest.get("metadata", {}).get("labels", {}).get(RUN_ID_LABEL)
+    if effective_run_id and effective_run_id != run_id:
+        chatter(
+            f"config passthrough overrode the {RUN_ID_LABEL!r} label "
+            f"(was {run_id!r}, now {effective_run_id!r})",
+            level="warn",
+        )
+        ui.set_run_tag(effective_run_id)
 
     if dry_run_server:
         session = Session(namespace=spec.namespace, context=context, quiet=spec.quiet)
@@ -414,6 +433,7 @@ def run(
 
 
 def _print_config(config_paths, no_default_config, profile):
+    ui.set_run_tag(None)  # config has no run context, even if invoked right after a 'run' in-process
     resolved_config, sources = _resolve_config(config_paths, no_default_config, profile)
     for path, origin in sources:
         chatter(f"{path} ({origin})", level="info")
