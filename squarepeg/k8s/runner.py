@@ -294,7 +294,9 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
                         "sweeping orphaned resources from previous runs",
                         quiet=spec.quiet,
                     ):
-                        sweep_orphans(session, spec, exclude_run_id=own_run_id)
+                        sweep_orphans(
+                            session, spec.orphan_sweep_min_age, quiet=spec.quiet, exclude_run_id=own_run_id
+                        )
                 except Exception as exc:
                     chatter(
                         f"orphan sweep skipped: {exc}", quiet=spec.quiet, level="warn"

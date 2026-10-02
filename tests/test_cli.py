@@ -1,3 +1,6 @@
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
 import yaml
 from click.testing import CliRunner
 from kubernetes.client.rest import ApiException
@@ -18,14 +21,20 @@ def _separated_runner():
 
 
 class FakeSession:
-    """Stands in for squarepeg.k8s.session.Session so CLI-level dry-run-server tests never
-    touch a real cluster; records the args it was constructed with for assertions."""
+    """Stands in for squarepeg.k8s.session.Session so CLI-level dry-run-server/clean tests
+    never touch a real cluster; records the args it was constructed with for assertions.
+    .core/.batch are plain MagicMocks returning empty lists by default, for 'clean' tests
+    that need a listable (but otherwise inert) session."""
 
     def __init__(self, namespace=None, context=None, quiet=False):
         self.namespace = namespace or "default"
         self.context = context
         self.quiet = quiet
         self.context_name = context or "fake-context"
+        self.core = MagicMock()
+        self.batch = MagicMock()
+        self.core.list_namespaced_pod.return_value = SimpleNamespace(items=[])
+        self.batch.list_namespaced_job.return_value = SimpleNamespace(items=[])
 
 
 def test_version():
@@ -463,3 +472,204 @@ def test_two_run_invocations_get_different_tags(monkeypatch):
     label1 = captured1["manifest"]["metadata"]["labels"]["squarepeg.io/run-id"]
     label2 = captured2["manifest"]["metadata"]["labels"]["squarepeg.io/run-id"]
     assert label1 != label2
+
+
+# --- clean ---
+
+CLEAN_CREATED_BY = "sam"
+
+
+def _clean_pod(name, phase="Succeeded", finished_ago=600, waiting_reason=None, created_by=CLEAN_CREATED_BY):
+    import datetime as dt
+
+    now = dt.datetime.now(dt.timezone.utc)
+    terminated = SimpleNamespace(finished_at=now - dt.timedelta(seconds=finished_ago)) if phase == "Succeeded" else None
+    waiting = SimpleNamespace(reason=waiting_reason) if waiting_reason else None
+    return SimpleNamespace(
+        metadata=SimpleNamespace(
+            name=name,
+            labels={"app.kubernetes.io/managed-by": "squarepeg", "squarepeg.io/created-by": created_by},
+            owner_references=[],
+            creation_timestamp=now - dt.timedelta(seconds=finished_ago),
+        ),
+        status=SimpleNamespace(
+            phase=phase,
+            container_statuses=[
+                SimpleNamespace(name="main", state=SimpleNamespace(waiting=waiting, terminated=terminated))
+            ],
+        ),
+    )
+
+
+def _mock_clean_session(monkeypatch, pods=(), jobs=()):
+    monkeypatch.setattr("squarepeg.k8s.orphans.current_created_by", lambda: CLEAN_CREATED_BY)
+
+    class RecordingFakeSession(FakeSession):
+        def __init__(self, namespace=None, context=None, quiet=False):
+            super().__init__(namespace=namespace, context=context, quiet=quiet)
+            self.core.list_namespaced_pod.return_value = SimpleNamespace(items=list(pods))
+            self.batch.list_namespaced_job.return_value = SimpleNamespace(items=list(jobs))
+
+    monkeypatch.setattr(cli_module, "Session", RecordingFakeSession)
+    return RecordingFakeSession
+
+
+def test_clean_dry_run_lists_without_deleting(monkeypatch):
+    _mock_clean_session(monkeypatch, pods=[_clean_pod("p")])
+    result = _separated_runner().invoke(cli, ["clean", "--no-default-config", "--dry-run"])
+    assert result.exit_code == 0, result.stderr
+    assert "pod/p" in result.stdout
+    assert "terminal" in result.stdout
+
+
+def test_clean_dry_run_quiet_still_lists_on_stdout(monkeypatch):
+    _mock_clean_session(monkeypatch, pods=[_clean_pod("p")])
+    result = _separated_runner().invoke(cli, ["clean", "--no-default-config", "--dry-run", "--quiet"])
+    assert result.exit_code == 0, result.stderr
+    assert "pod/p" in result.stdout
+    assert result.stderr == ""
+
+
+def test_clean_deletes_and_exits_zero(monkeypatch):
+    _mock_clean_session(monkeypatch, pods=[_clean_pod("p")])
+    result = _separated_runner().invoke(cli, ["clean", "--no-default-config"])
+    assert result.exit_code == 0, result.stderr
+    assert "deleted pod 'p'" in result.stderr
+
+
+def test_clean_empty_namespace_exits_zero(monkeypatch):
+    _mock_clean_session(monkeypatch)
+    result = _separated_runner().invoke(cli, ["clean", "--no-default-config"])
+    assert result.exit_code == 0, result.stderr
+    assert "nothing to clean" in result.stderr
+
+
+def test_clean_partial_failure_exit_code(monkeypatch):
+    monkeypatch.setattr("squarepeg.k8s.orphans.current_created_by", lambda: CLEAN_CREATED_BY)
+
+    class FailingFakeSession(FakeSession):
+        def __init__(self, namespace=None, context=None, quiet=False):
+            super().__init__(namespace=namespace, context=context, quiet=quiet)
+            self.core.list_namespaced_pod.return_value = SimpleNamespace(items=[_clean_pod("p1"), _clean_pod("p2")])
+            self.core.delete_namespaced_pod.side_effect = [ApiException(status=500, reason="err"), None]
+
+    monkeypatch.setattr(cli_module, "Session", FailingFakeSession)
+    result = _separated_runner().invoke(cli, ["clean", "--no-default-config"])
+    assert result.exit_code != 0
+    assert result.exception.exit_code == 125
+    assert "failed to delete 1 of 2" in str(result.exception)
+
+
+def test_clean_listing_failure_exits_125(monkeypatch):
+    monkeypatch.setattr("squarepeg.k8s.orphans.current_created_by", lambda: CLEAN_CREATED_BY)
+
+    class RaisingFakeSession(FakeSession):
+        def __init__(self, namespace=None, context=None, quiet=False):
+            super().__init__(namespace=namespace, context=context, quiet=quiet)
+            self.core.list_namespaced_pod.side_effect = ApiException(status=403, reason="Forbidden")
+
+    monkeypatch.setattr(cli_module, "Session", RaisingFakeSession)
+    result = _separated_runner().invoke(cli, ["clean", "--no-default-config"])
+    assert result.exit_code != 0
+    assert result.exception.exit_code == 125
+
+
+def test_clean_namespace_and_context_forwarded_to_session(monkeypatch):
+    constructed = {}
+    monkeypatch.setattr("squarepeg.k8s.orphans.current_created_by", lambda: CLEAN_CREATED_BY)
+
+    class RecordingFakeSession(FakeSession):
+        def __init__(self, namespace=None, context=None, quiet=False):
+            constructed["namespace"] = namespace
+            constructed["context"] = context
+            super().__init__(namespace=namespace, context=context, quiet=quiet)
+
+    monkeypatch.setattr(cli_module, "Session", RecordingFakeSession)
+    result = _separated_runner().invoke(
+        cli, ["clean", "--no-default-config", "-n", "my-ns", "--context", "my-ctx", "--dry-run"]
+    )
+    assert result.exit_code == 0, result.stderr
+    assert constructed["namespace"] == "my-ns"
+    assert constructed["context"] == "my-ctx"
+
+
+def test_clean_min_age_flag_overrides_default(monkeypatch):
+    captured = {}
+    monkeypatch.setattr("squarepeg.k8s.orphans.current_created_by", lambda: CLEAN_CREATED_BY)
+
+    def fake_clean_orphans(session, min_age, **kwargs):
+        captured["min_age"] = min_age
+        from squarepeg.k8s.orphans import CleanResult
+
+        return CleanResult()
+
+    monkeypatch.setattr(cli_module, "Session", FakeSession)
+    monkeypatch.setattr(cli_module, "clean_orphans", fake_clean_orphans)
+
+    _separated_runner().invoke(cli, ["clean", "--no-default-config", "--min-age", "60"])
+    assert captured["min_age"] == 60
+
+    _separated_runner().invoke(cli, ["clean", "--no-default-config"])
+    assert captured["min_age"] == 300
+
+
+def test_clean_min_age_from_config(monkeypatch, tmp_path):
+    captured = {}
+    monkeypatch.setattr("squarepeg.k8s.orphans.current_created_by", lambda: CLEAN_CREATED_BY)
+
+    def fake_clean_orphans(session, min_age, **kwargs):
+        captured["min_age"] = min_age
+        from squarepeg.k8s.orphans import CleanResult
+
+        return CleanResult()
+
+    monkeypatch.setattr(cli_module, "Session", FakeSession)
+    monkeypatch.setattr(cli_module, "clean_orphans", fake_clean_orphans)
+
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("orphan_sweep_min_age: 42\n")
+    _separated_runner().invoke(cli, ["clean", "--no-default-config", "--config", str(config_file)])
+    assert captured["min_age"] == 42
+
+
+def test_clean_negative_min_age_rejected(monkeypatch):
+    monkeypatch.setattr(cli_module, "Session", FakeSession)
+    result = _separated_runner().invoke(cli, ["clean", "--no-default-config", "--min-age", "-1"])
+    assert result.exit_code != 0
+    assert "--min-age" in str(result.exception)
+
+
+def test_clean_runs_regardless_of_orphan_sweep_config_key(monkeypatch, tmp_path):
+    _mock_clean_session(monkeypatch, pods=[_clean_pod("p")])
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("orphan_sweep: false\n")
+    result = _separated_runner().invoke(cli, ["clean", "--no-default-config", "--config", str(config_file)])
+    assert result.exit_code == 0, result.stderr
+    assert "deleted pod 'p'" in result.stderr
+
+
+def test_clean_tag_present_and_differs_between_invocations(monkeypatch):
+    import re
+
+    _mock_clean_session(monkeypatch)
+    result1 = _separated_runner().invoke(cli, ["clean", "--no-default-config"])
+    result2 = _separated_runner().invoke(cli, ["clean", "--no-default-config"])
+    tag1 = re.search(r"\[squarepeg:([0-9a-f]{8})\]", result1.stderr).group(1)
+    tag2 = re.search(r"\[squarepeg:([0-9a-f]{8})\]", result2.stderr).group(1)
+    assert tag1 != tag2
+
+
+def test_clean_followed_by_config_leaves_config_untagged(monkeypatch):
+    _mock_clean_session(monkeypatch)
+    _separated_runner().invoke(cli, ["clean", "--no-default-config"])
+    result = _separated_runner().invoke(cli, ["config", "--no-default-config"])
+    assert "[squarepeg:" not in result.stderr
+
+
+def test_format_age_examples():
+    from squarepeg.cli import _format_age
+
+    assert _format_age(5) == "5s"
+    assert _format_age(612) == "10m12s"
+    assert _format_age(11640) == "3h14m"
+    assert _format_age(188000) == "2d4h"
