@@ -51,6 +51,19 @@ class FakeWatch:
         self.stopped = True
 
 
+@pytest.fixture
+def fake_clock(monkeypatch):
+    """Advance runner's monotonic clock one second per read, so a startup wait whose (fake)
+    watch returns nothing reaches its timeout instantly rather than in real seconds."""
+    now = [0.0]
+
+    def tick():
+        now[0] += 1
+        return now[0]
+
+    monkeypatch.setattr(runner.time, "monotonic", tick)
+
+
 def basic_spec(**overrides):
     defaults = dict(image="alpine", name="squarepeg-alpine-abc123", timeout=5)
     defaults.update(overrides)
@@ -147,7 +160,7 @@ def test_discover_job_pod_returns_name_from_first_event(monkeypatch):
     assert runner.discover_job_pod(session, "myjob", timeout=5) == "child-pod"
 
 
-def test_discover_job_pod_timeout_raises(monkeypatch):
+def test_discover_job_pod_timeout_raises(monkeypatch, fake_clock):
     session = make_session()
     monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([]))
     with pytest.raises(RunnerError, match="timed out"):
@@ -173,14 +186,14 @@ def test_wait_fails_fast_on_image_pull_backoff(monkeypatch):
         runner.wait_until_running_or_terminal(session, "p", timeout=5)
 
 
-def test_wait_timeout_raises(monkeypatch):
+def test_wait_timeout_raises(monkeypatch, fake_clock):
     session = make_session()
     monkeypatch.setattr(runner.watch, "Watch", lambda: FakeWatch([]))
     with pytest.raises(RunnerError, match="timed out"):
         runner.wait_until_running_or_terminal(session, "p", timeout=5)
 
 
-def test_wait_timeout_does_not_repeat_warnings_already_surfaced(monkeypatch, capsys):
+def test_wait_timeout_does_not_repeat_warnings_already_surfaced(monkeypatch, capsys, fake_clock):
     """A warning printed live by WarningEventWatcher mustn't be printed again in the
     post-timeout event dump; events not yet shown still are."""
     session = make_session()
@@ -208,6 +221,83 @@ def test_wait_timeout_does_not_repeat_warnings_already_surfaced(monkeypatch, cap
     err = capsys.readouterr().err
     assert err.count("Insufficient nvidia.com/gpu") == 1
     assert "assigned" in err
+
+
+def test_wait_rewatches_in_short_slices_until_timeout(monkeypatch, fake_clock):
+    session = make_session()
+    slices = []
+
+    class RecordingWatch(FakeWatch):
+        def stream(self, *_args, **kwargs):
+            slices.append(kwargs["timeout_seconds"])
+            yield from ()
+
+    monkeypatch.setattr(runner.watch, "Watch", lambda: RecordingWatch([]))
+    with pytest.raises(RunnerError, match="timed out"):
+        runner.wait_until_running_or_terminal(session, "p", timeout=60)
+    assert len(slices) > 1
+    assert max(slices) <= runner.STARTUP_WATCH_SLICE_SECONDS
+
+
+def test_wait_stops_promptly_when_interrupted(monkeypatch, fake_clock):
+    """Ctrl+C only sets stop_event; the startup wait must notice it at the next slice rather
+    than carrying on until --timeout."""
+    session = make_session()
+    stop_event = threading.Event()
+    calls = []
+
+    class InterruptingWatch(FakeWatch):
+        def stream(self, *_args, **_kwargs):
+            calls.append(1)
+            stop_event.set()
+            yield from ()
+
+    monkeypatch.setattr(runner.watch, "Watch", lambda: InterruptingWatch([]))
+    with pytest.raises(InterruptError):
+        runner.wait_until_running_or_terminal(session, "p", timeout=3600, stop_event=stop_event)
+    assert len(calls) == 1
+
+
+def test_wait_interrupted_mid_stream_stops_before_next_event(monkeypatch):
+    session = make_session()
+    stop_event = threading.Event()
+    stop_event.set()
+    monkeypatch.setattr(
+        runner.watch, "Watch", lambda: FakeWatch([{"object": pod_object(phase="Running")}])
+    )
+    with pytest.raises(InterruptError):
+        runner.wait_until_running_or_terminal(session, "p", timeout=60, stop_event=stop_event)
+
+
+def test_discover_job_pod_stops_promptly_when_interrupted(monkeypatch, fake_clock):
+    session = make_session()
+    stop_event = threading.Event()
+
+    class InterruptingWatch(FakeWatch):
+        def stream(self, *_args, **_kwargs):
+            stop_event.set()
+            yield from ()
+
+    monkeypatch.setattr(runner.watch, "Watch", lambda: InterruptingWatch([]))
+    with pytest.raises(InterruptError):
+        runner.discover_job_pod(session, "myjob", timeout=3600, stop_event=stop_event)
+
+
+def test_run_manifest_ctrl_c_during_startup_wait_cleans_up_without_timing_out(monkeypatch, fake_clock):
+    """End to end: a SIGINT while the pod is stuck Pending ends the run with InterruptError
+    (not a timeout) and still deletes the pod."""
+    session = make_session()
+
+    class PendingThenSigint(FakeWatch):
+        def stream(self, *_args, **_kwargs):
+            os.kill(os.getpid(), signal.SIGINT)
+            yield {"object": pod_object(phase="Pending")}
+
+    monkeypatch.setattr(runner.watch, "Watch", lambda: PendingThenSigint([]))
+    manifest = {"metadata": {"name": "squarepeg-alpine-abc123"}}
+    with pytest.raises(InterruptError):
+        runner.run_manifest(session, basic_spec(mode="pod", timeout=3600, orphan_sweep=False), manifest)
+    session.core.delete_namespaced_pod.assert_called_once()
 
 
 # --- extract_exit_code ---
