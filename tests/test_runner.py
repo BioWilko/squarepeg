@@ -180,6 +180,36 @@ def test_wait_timeout_raises(monkeypatch):
         runner.wait_until_running_or_terminal(session, "p", timeout=5)
 
 
+def test_wait_timeout_does_not_repeat_warnings_already_surfaced(monkeypatch, capsys):
+    """A warning printed live by WarningEventWatcher mustn't be printed again in the
+    post-timeout event dump; events not yet shown still are."""
+    session = make_session()
+    warning = SimpleNamespace(reason="FailedScheduling", message="Insufficient nvidia.com/gpu", type="Warning")
+    normal = SimpleNamespace(reason="Scheduled", message="assigned", type="Normal")
+    session.core.list_namespaced_event.return_value = SimpleNamespace(items=[warning, normal])
+
+    class SurfacingWatch(FakeWatch):
+        def stream(self, *_args, **_kwargs):
+            runner_events.report_new_warnings()
+            yield from ()
+
+    real_watcher = runner.WarningEventWatcher
+    runner_events = None
+
+    def capture(*args, **kwargs):
+        nonlocal runner_events
+        runner_events = real_watcher(*args, **kwargs)
+        return runner_events
+
+    monkeypatch.setattr(runner, "WarningEventWatcher", capture)
+    monkeypatch.setattr(runner.watch, "Watch", lambda: SurfacingWatch([]))
+    with pytest.raises(RunnerError, match="timed out"):
+        runner.wait_until_running_or_terminal(session, "p", timeout=5)
+    err = capsys.readouterr().err
+    assert err.count("Insufficient nvidia.com/gpu") == 1
+    assert "assigned" in err
+
+
 # --- extract_exit_code ---
 
 

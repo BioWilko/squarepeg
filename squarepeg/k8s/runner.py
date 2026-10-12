@@ -11,7 +11,7 @@ from kubernetes.client.rest import ApiException
 from squarepeg import ui
 from squarepeg.errors import InterruptError, RunnerError
 from squarepeg.k8s.apierrors import delete_resource, wrap_api_exception
-from squarepeg.k8s.events import print_pod_events
+from squarepeg.k8s.events import WarningEventWatcher, print_pod_events
 from squarepeg.k8s.logs import stream_logs
 from squarepeg.k8s.orphans import sweep_orphans
 from squarepeg.k8s.podstate import FAIL_FAST_REASONS
@@ -38,7 +38,13 @@ def create_resource(session, spec: RunSpec, manifest: dict) -> None:
         raise wrap_api_exception(exc, f"failed to create {spec.mode} {name!r}") from exc
 
 
-def discover_job_pod(session, job_name: str, timeout: int) -> str:
+def discover_job_pod(session, job_name: str, timeout: int, *, quiet: bool = False) -> str:
+    # job-level warnings (e.g. FailedCreate from an exceeded quota) are why a job never makes a pod
+    with WarningEventWatcher(session, job_name, timeout=timeout, quiet=quiet):
+        return _watch_for_job_pod(session, job_name, timeout)
+
+
+def _watch_for_job_pod(session, job_name: str, timeout: int) -> str:
     watcher = watch.Watch()
     try:
         for event in watcher.stream(
@@ -65,10 +71,12 @@ def wait_until_running_or_terminal(
     This bounds only the *startup* window (image pull, scheduling, container create); once the
     container is actually running, log streaming plus wait_for_terminal take over with no timeout.
     """
+    events = WarningEventWatcher(session, pod_name, timeout=timeout, quiet=quiet)
     try:
-        return _watch_for_start(session, pod_name, timeout)
+        with events:
+            return _watch_for_start(session, pod_name, timeout)
     except RunnerError:
-        print_pod_events(session, pod_name, quiet=quiet)
+        print_pod_events(session, pod_name, quiet=quiet, skip=frozenset(events.shown))
         raise
 
 
@@ -213,7 +221,7 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
                     slow_hint="the job controller has not produced a pod yet",
                     slow_after=15,
                 ):
-                    pod_name = discover_job_pod(session, name, spec.timeout)
+                    pod_name = discover_job_pod(session, name, spec.timeout, quiet=spec.quiet)
             else:
                 pod_name = name
 
