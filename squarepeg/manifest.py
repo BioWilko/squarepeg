@@ -70,6 +70,9 @@ def _build_resources(spec: RunSpec) -> dict:
         limits["cpu"] = spec.resources.limit_cpu
     if spec.resources.limit_memory is not None:
         limits["memory"] = spec.resources.limit_memory
+    if spec.resources.gpus is not None:
+        requests[spec.resources.gpu_resource] = spec.resources.gpus
+        limits[spec.resources.gpu_resource] = spec.resources.gpus
     resources = {}
     if requests:
         resources["requests"] = requests
@@ -105,6 +108,8 @@ def _build_container(spec: RunSpec) -> dict:
 
 def _build_pod_spec(spec: RunSpec) -> dict:
     pod_spec = {"restartPolicy": "Never", "containers": [_build_container(spec)]}
+    if spec.resources.gpus and spec.resources.gpu_runtime_class:
+        pod_spec["runtimeClassName"] = spec.resources.gpu_runtime_class
     volumes = _build_volumes(spec)
     if volumes:
         pod_spec["volumes"] = volumes

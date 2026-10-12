@@ -79,10 +79,9 @@ job:
 # selected with --profile NAME; deep-merges over the rest of this config
 profiles:
   gpu:
-    defaults: {cpus: "8", memory: 32g}
+    # gpus sets the nvidia.com/gpu request+limit and runtimeClassName: nvidia; override those
+    # names with gpu_resource / gpu_runtime_class (null disables the runtime class)
+    defaults: {cpus: "8", memory: 32g, gpus: 1}
     kubernetes:
       spec:
         nodeSelector: {"nvidia.com/gpu.present": "true"}
-        containers:
-          - name: main
-            resources: {limits: {"nvidia.com/gpu": 1}}

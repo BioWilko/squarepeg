@@ -41,7 +41,7 @@ _STYLES: dict[Level, dict] = {
 
 _SPINNER_FRAMES_UNICODE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 _SPINNER_FRAMES_ASCII = ["|", "/", "-", "\\"]
-_SPINNER_INTERVAL = 0.1
+_SPINNER_INTERVAL = 0.25
 
 _LOCK = threading.RLock()
 _ACTIVE: "Status | None" = None
@@ -97,17 +97,44 @@ def animation_enabled() -> bool:
     return getattr(sys.stderr, "isatty", lambda: False)()
 
 
-def _spinner_frames() -> list[str]:
+def _stderr_is_utf() -> bool:
     encoding = getattr(sys.stderr, "encoding", None) or ""
-    if "utf" in encoding.lower():
-        return _SPINNER_FRAMES_UNICODE
-    return _SPINNER_FRAMES_ASCII
+    return "utf" in encoding.lower()
+
+
+def _spinner_frames() -> list[str]:
+    return _SPINNER_FRAMES_UNICODE if _stderr_is_utf() else _SPINNER_FRAMES_ASCII
+
+
+def _term_width() -> int:
+    # stderr, not shutil.get_terminal_size(): that reads stdout, which may be piped
+    try:
+        return os.get_terminal_size(sys.stderr.fileno()).columns
+    except (OSError, ValueError, AttributeError):
+        return 80
+
+
+def _label() -> str:
+    tag = current_run_tag()
+    return f"[squarepeg:{tag}] " if tag else "[squarepeg] "
+
+
+def _fit(message: str, width: int) -> str:
+    """Truncate `message` so the prefixed line fits on one row of a `width`-column terminal.
+
+    A redrawn line must never wrap: "\r\x1b[2K" only returns to and clears the last
+    wrapped row, so every redraw would otherwise leave the earlier rows behind. Everything
+    squarepeg puts on a spinner line is single-width, so len() is the display width.
+    """
+    room = width - 1 - len(_label())
+    if len(message) <= room:
+        return message
+    ellipsis = "…" if _stderr_is_utf() else "..."
+    return message[: max(room - len(ellipsis), 0)] + ellipsis
 
 
 def _styled_line(message: str, level: Level) -> str:
-    tag = current_run_tag()
-    label = f"[squarepeg:{tag}] " if tag else "[squarepeg] "
-    prefix = click.style(label, dim=True)
+    prefix = click.style(_label(), dim=True)
     body = click.style(message, **_STYLES[level])
     return prefix + body
 
@@ -127,8 +154,9 @@ def emit(message: str, *, level: Level = "info", quiet: bool = False) -> None:
 class Status:
     """Context manager for a stage that may take a while.
 
-    On a real terminal, shows an animated spinner line (stderr only) with an elapsed
-    timer and, past `slow_after` seconds, a `slow_hint`. Everywhere else (non-TTY,
+    On a real terminal, shows an animated spinner line (stderr only), truncated to the
+    terminal width, with an elapsed timer; past `slow_after` seconds the `slow_hint` is
+    printed once on its own line above it. Everywhere else (non-TTY,
     --no-color, --quiet, TERM=dumb) it degrades to a single static line printed once on
     entry -- including the slow_hint text upfront, since there is no timer to add it
     later -- and nothing further is printed on exit besides the optional `success` line.
@@ -154,6 +182,7 @@ class Status:
         self._stop = threading.Event()
         self._start_time: float | None = None
         self._line_drawn = False
+        self._hint_shown = False
 
     def update(self, message: str) -> None:
         with _LOCK:
@@ -172,7 +201,12 @@ class Status:
 
         self._start_time = time.monotonic()
         with _LOCK:
-            click.echo(_styled_line(self.message, "wait"), file=sys.stderr, nl=False, color=color_enabled())
+            click.echo(
+                _styled_line(_fit(self.message, _term_width()), "wait"),
+                file=sys.stderr,
+                nl=False,
+                color=color_enabled(),
+            )
             self._line_drawn = True
             _ACTIVE = self
         self._thread = threading.Thread(target=self._animate, daemon=True)
@@ -210,9 +244,12 @@ class Status:
                 text = self.message
                 if elapsed >= 2:
                     text = f"{text} ({int(elapsed)}s)"
-                if self.slow_hint and elapsed >= self.slow_after:
-                    text = f"{text} — {self.slow_hint}"
-                line = f"\r\x1b[2K{_styled_line(f'{next(frames)} {text}', 'wait')}"
+                if self.slow_hint and not self._hint_shown and elapsed >= self.slow_after:
+                    self._erase()
+                    click.echo(_styled_line(self.slow_hint, "detail"), file=sys.stderr, color=color_enabled())
+                    self._hint_shown = True
+                text = _fit(f"{next(frames)} {text}", _term_width())
+                line = f"\r\x1b[2K{_styled_line(text, 'wait')}"
                 click.echo(line, file=sys.stderr, nl=False, color=color_enabled())
                 self._line_drawn = True
             self._stop.wait(_SPINNER_INTERVAL)

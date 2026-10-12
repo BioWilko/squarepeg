@@ -2,8 +2,10 @@
 extract its exit code, and clean up.
 """
 
+import math
 import signal
 import threading
+import time
 
 from kubernetes import watch
 from kubernetes.client.rest import ApiException
@@ -11,7 +13,7 @@ from kubernetes.client.rest import ApiException
 from squarepeg import ui
 from squarepeg.errors import InterruptError, RunnerError
 from squarepeg.k8s.apierrors import delete_resource, wrap_api_exception
-from squarepeg.k8s.events import print_pod_events
+from squarepeg.k8s.events import WarningEventWatcher, print_pod_events
 from squarepeg.k8s.logs import stream_logs
 from squarepeg.k8s.orphans import sweep_orphans
 from squarepeg.k8s.podstate import FAIL_FAST_REASONS
@@ -26,6 +28,11 @@ _wrap_api_exception = wrap_api_exception
 # has already started; the loop simply re-watches if this elapses.
 TERMINAL_WATCH_POLL_SECONDS = 5
 
+# the startup waits (job creating its pod, pod scheduling/pulling) are bounded by --timeout, but
+# still watch in slices this long: Ctrl+C only sets stop_event, so a single --timeout-long watch
+# would just resume its blocked read and not notice the interrupt until the timeout expired.
+STARTUP_WATCH_SLICE_SECONDS = 2
+
 
 def create_resource(session, spec: RunSpec, manifest: dict) -> None:
     name = manifest["metadata"]["name"]
@@ -38,48 +45,83 @@ def create_resource(session, spec: RunSpec, manifest: dict) -> None:
         raise wrap_api_exception(exc, f"failed to create {spec.mode} {name!r}") from exc
 
 
-def discover_job_pod(session, job_name: str, timeout: int) -> str:
-    watcher = watch.Watch()
+def _watch_pods_until(session, timeout: int, stop_event: threading.Event | None, what: str, **selector):
+    """Yield pod watch events matching `selector` until `timeout` seconds have passed, in
+    STARTUP_WATCH_SLICE_SECONDS slices, raising InterruptError as soon as stop_event is set."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptError(f"interrupted while waiting for {what}")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        watcher = watch.Watch()
+        try:
+            for event in watcher.stream(
+                session.core.list_namespaced_pod,
+                namespace=session.namespace,
+                timeout_seconds=max(1, min(STARTUP_WATCH_SLICE_SECONDS, math.ceil(remaining))),
+                **selector,
+            ):
+                if stop_event is not None and stop_event.is_set():
+                    raise InterruptError(f"interrupted while waiting for {what}")
+                yield event
+        finally:
+            watcher.stop()
+
+
+def discover_job_pod(
+    session,
+    job_name: str,
+    timeout: int,
+    *,
+    quiet: bool = False,
+    stop_event: threading.Event | None = None,
+) -> str:
+    # job-level warnings (e.g. FailedCreate from an exceeded quota) are why a job never makes a pod
+    with WarningEventWatcher(session, job_name, timeout=timeout, quiet=quiet):
+        return _watch_for_job_pod(session, job_name, timeout, stop_event)
+
+
+def _watch_for_job_pod(session, job_name: str, timeout: int, stop_event: threading.Event | None) -> str:
     try:
-        for event in watcher.stream(
-            session.core.list_namespaced_pod,
-            namespace=session.namespace,
-            label_selector=f"job-name={job_name}",
-            timeout_seconds=timeout,
+        for event in _watch_pods_until(
+            session, timeout, stop_event, f"job {job_name!r} to create a pod", label_selector=f"job-name={job_name}"
         ):
             return event["object"].metadata.name
     except ApiException as exc:
         raise _wrap_api_exception(
             exc, f"failed to watch for the pod created by job {job_name!r}"
         ) from exc
-    finally:
-        watcher.stop()
     raise RunnerError(f"timed out waiting for job {job_name!r} to create a pod")
 
 
 def wait_until_running_or_terminal(
-    session, pod_name: str, timeout: int, *, quiet: bool = False
+    session,
+    pod_name: str,
+    timeout: int,
+    *,
+    quiet: bool = False,
+    stop_event: threading.Event | None = None,
 ) -> str:
     """Wait until the pod is Running/Succeeded/Failed, or fail fast on a known-bad waiting reason.
 
     This bounds only the *startup* window (image pull, scheduling, container create); once the
     container is actually running, log streaming plus wait_for_terminal take over with no timeout.
     """
+    events = WarningEventWatcher(session, pod_name, timeout=timeout, quiet=quiet)
     try:
-        return _watch_for_start(session, pod_name, timeout)
+        with events:
+            return _watch_for_start(session, pod_name, timeout, stop_event)
     except RunnerError:
-        print_pod_events(session, pod_name, quiet=quiet)
+        print_pod_events(session, pod_name, quiet=quiet, skip=frozenset(events.shown))
         raise
 
 
-def _watch_for_start(session, pod_name: str, timeout: int) -> str:
-    watcher = watch.Watch()
+def _watch_for_start(session, pod_name: str, timeout: int, stop_event: threading.Event | None) -> str:
     try:
-        for event in watcher.stream(
-            session.core.list_namespaced_pod,
-            namespace=session.namespace,
-            field_selector=f"metadata.name={pod_name}",
-            timeout_seconds=timeout,
+        for event in _watch_pods_until(
+            session, timeout, stop_event, f"pod {pod_name!r} to start", field_selector=f"metadata.name={pod_name}"
         ):
             pod = event["object"]
             phase = pod.status.phase
@@ -93,8 +135,6 @@ def _watch_for_start(session, pod_name: str, timeout: int) -> str:
                 return phase
     except ApiException as exc:
         raise _wrap_api_exception(exc, f"failed to watch pod {pod_name!r}") from exc
-    finally:
-        watcher.stop()
     raise RunnerError(
         f"timed out after {timeout}s waiting for pod {pod_name!r} to start"
     )
@@ -213,7 +253,9 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
                     slow_hint="the job controller has not produced a pod yet",
                     slow_after=15,
                 ):
-                    pod_name = discover_job_pod(session, name, spec.timeout)
+                    pod_name = discover_job_pod(
+                        session, name, spec.timeout, quiet=spec.quiet, stop_event=handler.stop_event
+                    )
             else:
                 pod_name = name
 
@@ -225,7 +267,7 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
                 spinner_delay=0.0,
             ):
                 phase = wait_until_running_or_terminal(
-                    session, pod_name, spec.timeout, quiet=spec.quiet
+                    session, pod_name, spec.timeout, quiet=spec.quiet, stop_event=handler.stop_event
                 )
 
             chatter(
@@ -294,7 +336,9 @@ def run_manifest(session, spec: RunSpec, manifest: dict) -> int:
                         "sweeping orphaned resources from previous runs",
                         quiet=spec.quiet,
                     ):
-                        sweep_orphans(session, spec, exclude_run_id=own_run_id)
+                        sweep_orphans(
+                            session, spec.orphan_sweep_min_age, quiet=spec.quiet, exclude_run_id=own_run_id
+                        )
                 except Exception as exc:
                     chatter(
                         f"orphan sweep skipped: {exc}", quiet=spec.quiet, level="warn"

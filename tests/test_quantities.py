@@ -1,7 +1,7 @@
 import pytest
 
 from squarepeg.errors import UsageError
-from squarepeg.quantities import docker_cpus_to_k8s, docker_memory_to_k8s
+from squarepeg.quantities import docker_cpus_to_k8s, docker_gpus_to_k8s, docker_memory_to_k8s
 
 
 @pytest.mark.parametrize(
@@ -53,3 +53,14 @@ def test_memory_rejects_junk():
 def test_memory_rejects_negative():
     with pytest.raises(UsageError):
         docker_memory_to_k8s("-512m")
+
+
+@pytest.mark.parametrize("value,expected", [("2", 2), (2, 2), ("count=2", 2), ("0", 0)])
+def test_gpus(value, expected):
+    assert docker_gpus_to_k8s(value) == expected
+
+
+@pytest.mark.parametrize("value", ["all", "device=0", "-1", "1.5", "abc"])
+def test_gpus_rejects_non_counts(value):
+    with pytest.raises(UsageError, match="explicit GPU count"):
+        docker_gpus_to_k8s(value)

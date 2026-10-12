@@ -161,3 +161,25 @@ def test_set_run_tag_none_clears_a_previously_set_tag(capsys):
     err = capsys.readouterr().err
     assert "[squarepeg:" not in err
     assert "[squarepeg] hello" in err
+
+
+# --- spinner line fitting ---
+
+
+def test_fit_leaves_short_message_alone():
+    assert ui._fit("short", 80) == "short"
+
+
+def test_fit_truncates_to_one_terminal_row(monkeypatch):
+    monkeypatch.setattr(ui, "_stderr_is_utf", lambda: True)
+    ui.set_run_tag("ca06ad35")
+    fitted = ui._fit("x" * 200, 80)
+    assert len(ui._label()) + len(fitted) == 79
+    assert fitted.endswith("…")
+
+
+def test_fit_uses_ascii_ellipsis_on_non_utf_stderr(monkeypatch):
+    monkeypatch.setattr(ui, "_stderr_is_utf", lambda: False)
+    fitted = ui._fit("x" * 200, 40)
+    assert len(ui._label()) + len(fitted) == 39
+    assert fitted.endswith("...")

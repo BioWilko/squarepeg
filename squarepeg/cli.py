@@ -15,15 +15,16 @@ from squarepeg.dockerargs import (
     parse_env_entries,
     reject_unsupported,
 )
-from squarepeg.errors import SquarepegError, UsageError
+from squarepeg.errors import RunnerError, SquarepegError, UsageError
 from squarepeg.k8s.dryrun import server_dry_run
+from squarepeg.k8s.orphans import DEFAULT_MIN_AGE_SECONDS, clean_orphans
 from squarepeg.k8s.runner import run_manifest
 from squarepeg.k8s.session import Session
 from squarepeg.labels import RUN_ID_LABEL
 from squarepeg.log import chatter
 from squarepeg.manifest import build_job, build_pod
 from squarepeg.naming import generate_name, validate_rfc1123
-from squarepeg.quantities import docker_cpus_to_k8s, docker_memory_to_k8s
+from squarepeg.quantities import docker_cpus_to_k8s, docker_gpus_to_k8s, docker_memory_to_k8s
 from squarepeg.runspec import ResourceSpec, RunSpec
 from squarepeg.volumes import auto_mounts_from_config, parse_volume_flag
 
@@ -64,7 +65,6 @@ def _unsupported_callback(ctx, param, value):
 _UNSUPPORTED_GROUPS: list[tuple[list[str], bool]] = [
     (["--network"], False),
     (["--privileged"], True),
-    (["--gpus"], False),
     (["-p", "--publish"], False),
     (["-d", "--detach"], True),
     (["--restart"], False),
@@ -154,6 +154,7 @@ def cli():
 )
 @click.option("--cpus", "cpus", default=None)
 @click.option("-m", "--memory", "memory", default=None)
+@click.option("--gpus", "gpus", default=None, help="GPU count (sets both request and limit)")
 @click.option("--request-cpu", "request_cpu", default=None)
 @click.option("--limit-cpu", "limit_cpu", default=None)
 @click.option("--request-memory", "request_memory", default=None)
@@ -198,6 +199,7 @@ def run(
     pull,
     cpus,
     memory,
+    gpus,
     request_cpu,
     limit_cpu,
     request_memory,
@@ -300,6 +302,22 @@ def run(
     if cli_set_memory and limit_memory is None:
         claims.add(f"/spec/containers/[name={container_name}]/resources/limits/memory")
 
+    if "gpu_resource" in config_defaults:
+        resources.gpu_resource = str(config_defaults["gpu_resource"])
+    if "gpu_runtime_class" in config_defaults:
+        # null/"" disables it, for clusters where the NVIDIA runtime is the node default
+        resources.gpu_runtime_class = config_defaults["gpu_runtime_class"] or None
+    cli_set_gpus = gpus is not None
+    if gpus is None and "gpus" in config_defaults:
+        gpus = config_defaults["gpus"]
+    if gpus is not None:
+        resources.gpus = docker_gpus_to_k8s(gpus)
+    if cli_set_gpus:
+        for kind in ("requests", "limits"):
+            claims.add(
+                f"/spec/containers/[name={container_name}]/resources/{kind}/{resources.gpu_resource}"
+            )
+
     if name is not None:
         validate_rfc1123(name, what="--name")
         claims.add("/metadata/name")
@@ -343,7 +361,7 @@ def run(
         resolved_config.get("orphan_sweep", True), "orphan_sweep"
     )
     orphan_sweep_min_age = coerce_int(
-        resolved_config.get("orphan_sweep_min_age", 300), "orphan_sweep_min_age"
+        resolved_config.get("orphan_sweep_min_age", DEFAULT_MIN_AGE_SECONDS), "orphan_sweep_min_age"
     )
     if orphan_sweep_min_age < 0:
         raise UsageError(
@@ -430,6 +448,97 @@ def run(
     spec.namespace = session.namespace
     exit_code = run_manifest(session, spec, manifest)
     raise SystemExit(exit_code)
+
+
+def _format_age(seconds: float) -> str:
+    """kubectl-style compact duration: the two largest non-zero units, e.g. '10m12s',
+    '3h14m', '2d4h'. Used only for --dry-run's human-readable listing."""
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    minutes, secs = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m{secs}s" if secs else f"{minutes}m"
+    hours, mins = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}h{mins}m" if mins else f"{hours}h"
+    days, hrs = divmod(hours, 24)
+    return f"{days}d{hrs}h" if hrs else f"{days}d"
+
+
+def _candidate_detail(candidate) -> str:
+    age = _format_age(candidate.age_seconds)
+    if candidate.category == "terminal":
+        return f"finished {age} ago"
+    return f"{candidate.reason} for {age}"
+
+
+@cli.command("clean")
+@click.option("--dry-run", "dry_run", is_flag=True, help="list what would be deleted without deleting anything")
+@click.option(
+    "--min-age",
+    "min_age",
+    type=int,
+    default=None,
+    help="seconds a resource must be eligible before it's cleaned (default: config orphan_sweep_min_age, else 300)",
+)
+@click.option("-n", "--namespace", "namespace", default=None)
+@click.option("--context", "context", default=None, help="kubeconfig context to use")
+@click.option("--quiet", "quiet", is_flag=True)
+@click.option(
+    "--no-color",
+    "no_color",
+    is_flag=True,
+    help="disable colour/animation in squarepeg's own stderr output",
+)
+@_add_config_options
+def clean(dry_run, min_age, namespace, context, quiet, no_color, config_paths, no_default_config, profile):
+    """Delete this user's own orphaned Pods/Jobs left behind by crashed or killed runs.
+
+    Scoped to your own resources only (never a teammate's), and --keep'd resources are
+    always exempt -- there is no flag to override either. Runs regardless of the
+    'orphan_sweep' config key, which only affects the automatic per-run sweep. There is
+    no confirmation prompt: the candidates are, by construction, either already finished
+    or stuck and unable to start, so nothing running is ever at risk -- use --dry-run to
+    preview what would be deleted first if you want to check.
+    """
+    ui.set_color_override(False if no_color else None)
+    ui.set_run_tag(secrets.token_hex(4))
+
+    resolved_config, _sources = _resolve_config(config_paths, no_default_config, profile)
+
+    if namespace is None:
+        namespace = resolved_config.get("namespace")
+    quiet = quiet or coerce_bool(resolved_config.get("quiet", False), "quiet")
+
+    if min_age is None:
+        min_age = coerce_int(
+            resolved_config.get("orphan_sweep_min_age", DEFAULT_MIN_AGE_SECONDS), "orphan_sweep_min_age"
+        )
+        if min_age < 0:
+            raise UsageError(f"'orphan_sweep_min_age' must not be negative, got {min_age}")
+    elif min_age < 0:
+        raise UsageError(f"--min-age must not be negative, got {min_age}")
+
+    session = Session(namespace=namespace, context=context, quiet=quiet)
+
+    with ui.Status("scanning for orphaned resources", quiet=quiet):
+        result = clean_orphans(session, min_age, quiet=quiet, dry_run=dry_run)
+
+    if dry_run:
+        if result.candidates:
+            kind_name_width = max(len(f"{c.kind}/{c.name}") for c in result.candidates)
+            category_width = max(len(c.category) for c in result.candidates)
+            for c in result.candidates:
+                kind_name = f"{c.kind}/{c.name}".ljust(kind_name_width)
+                category = c.category.ljust(category_width)
+                click.echo(f"{kind_name}  {category}  {_candidate_detail(c)}")
+        return
+
+    if result.failed:
+        raise RunnerError(
+            f"failed to delete {len(result.failed)} of {len(result.candidates)} orphaned resource(s)"
+        )
 
 
 def _print_config(config_paths, no_default_config, profile):

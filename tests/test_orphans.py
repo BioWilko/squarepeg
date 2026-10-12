@@ -7,7 +7,6 @@ from kubernetes.client.rest import ApiException
 
 from squarepeg.errors import ApiError
 from squarepeg.k8s import orphans
-from squarepeg.runspec import RunSpec
 
 NOW = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 CREATED_BY = "sam"
@@ -94,12 +93,6 @@ def fake_job(name, *, created_by=CREATED_BY, run_id="other-run-id", keep=False, 
 
 def condition(type_, status="True", last_transition_time=None):
     return SimpleNamespace(type=type_, status=status, last_transition_time=last_transition_time)
-
-
-def basic_spec(**overrides):
-    defaults = dict(image="alpine", name="squarepeg-alpine-abc123", orphan_sweep_min_age=300)
-    defaults.update(overrides)
-    return RunSpec(**defaults)
 
 
 # --- selector construction ---
@@ -312,7 +305,7 @@ def test_sweep_deletes_pod_and_job_with_correct_calls():
     pods = [fake_pod("p", phase="Succeeded", container_statuses=finished(600))]
     jobs = [fake_job("j", conditions=[condition("Complete", last_transition_time=NOW - timedelta(seconds=600))])]
     session = make_session(pods=pods, jobs=jobs)
-    count = orphans.sweep_orphans(session, basic_spec(), now=NOW)
+    count = orphans.sweep_orphans(session, 300, now=NOW)
     assert count == 2
     session.core.delete_namespaced_pod.assert_called_once_with("p", "default")
     args, kwargs = session.batch.delete_namespaced_job.call_args
@@ -323,7 +316,7 @@ def test_sweep_deletes_pod_and_job_with_correct_calls():
 def test_stuck_pod_deletes_via_identical_call_as_terminal_pod():
     pods = [fake_pod("stuck", phase="Pending", container_statuses=waiting("ImagePullBackOff"), creation_offset=600)]
     session = make_session(pods=pods)
-    orphans.sweep_orphans(session, basic_spec(), now=NOW)
+    orphans.sweep_orphans(session, 300, now=NOW)
     session.core.delete_namespaced_pod.assert_called_once_with("stuck", "default")
 
 
@@ -331,7 +324,7 @@ def test_delete_404_tolerated_and_not_counted():
     pods = [fake_pod("p", phase="Succeeded", container_statuses=finished(600))]
     session = make_session(pods=pods)
     session.core.delete_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
-    assert orphans.sweep_orphans(session, basic_spec(), now=NOW) == 0
+    assert orphans.sweep_orphans(session, 300, now=NOW) == 0
 
 
 def test_one_delete_failure_does_not_abort_the_rest():
@@ -344,7 +337,7 @@ def test_one_delete_failure_does_not_abort_the_rest():
         ApiException(status=500, reason="Server Error"),
         None,
     ]
-    assert orphans.sweep_orphans(session, basic_spec(), now=NOW) == 1
+    assert orphans.sweep_orphans(session, 300, now=NOW) == 1
 
 
 # --- output ---
@@ -353,20 +346,20 @@ def test_one_delete_failure_does_not_abort_the_rest():
 def test_summary_message_on_nonzero_count(capsys):
     pods = [fake_pod("p", phase="Succeeded", container_statuses=finished(600))]
     session = make_session(pods=pods)
-    orphans.sweep_orphans(session, basic_spec(quiet=False), now=NOW)
+    orphans.sweep_orphans(session, 300, quiet=False, now=NOW)
     assert "swept 1 orphaned resource" in capsys.readouterr().err
 
 
 def test_no_message_when_nothing_swept(capsys):
     session = make_session()
-    orphans.sweep_orphans(session, basic_spec(quiet=False), now=NOW)
+    orphans.sweep_orphans(session, 300, quiet=False, now=NOW)
     assert capsys.readouterr().err == ""
 
 
 def test_quiet_suppresses_summary_message(capsys):
     pods = [fake_pod("p", phase="Succeeded", container_statuses=finished(600))]
     session = make_session(pods=pods)
-    orphans.sweep_orphans(session, basic_spec(quiet=True), now=NOW)
+    orphans.sweep_orphans(session, 300, quiet=True, now=NOW)
     assert capsys.readouterr().err == ""
 
 
@@ -374,4 +367,172 @@ def test_list_failure_raises_apierror_naming_the_opt_out():
     session = make_session()
     session.core.list_namespaced_pod.side_effect = ApiException(status=403, reason="Forbidden")
     with pytest.raises(ApiError, match="orphan_sweep"):
-        orphans.sweep_orphans(session, basic_spec(), now=NOW)
+        orphans.sweep_orphans(session, 300, now=NOW)
+
+
+# --- find_orphan_candidates ---
+
+
+def test_candidates_terminal_pod_classification():
+    pods = [fake_pod("p", phase="Succeeded", container_statuses=finished(600))]
+    session = make_session(pods=pods)
+    candidates = orphans.find_orphan_candidates(session, CREATED_BY, 300, now=NOW)
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert (c.kind, c.name, c.category, c.reason) == ("pod", "p", "terminal", None)
+    assert c.age_seconds == 600
+
+
+def test_candidates_stuck_pod_classification():
+    pods = [fake_pod("p", phase="Pending", container_statuses=waiting("ImagePullBackOff"), creation_offset=600)]
+    session = make_session(pods=pods)
+    candidates = orphans.find_orphan_candidates(session, CREATED_BY, 300, now=NOW)
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert (c.kind, c.name, c.category, c.reason) == ("pod", "p", "stuck", "ImagePullBackOff")
+    assert c.age_seconds == 600
+
+
+def test_candidates_job_terminal_by_condition():
+    jobs = [fake_job("j", conditions=[condition("Complete", last_transition_time=NOW - timedelta(seconds=600))])]
+    session = make_session(jobs=jobs)
+    candidates = orphans.find_orphan_candidates(session, CREATED_BY, 300, now=NOW)
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert (c.kind, c.name, c.category, c.reason) == ("job", "j", "terminal", None)
+
+
+def test_candidates_job_stuck_via_child_pod():
+    pods = [
+        fake_pod(
+            "child-pod", phase="Pending", job_name="stuck-job",
+            container_statuses=waiting("ImagePullBackOff"), creation_offset=600,
+        )
+    ]
+    jobs = [fake_job("stuck-job", conditions=[])]
+    session = make_session(pods=pods, jobs=jobs)
+    candidates = orphans.find_orphan_candidates(session, CREATED_BY, 300, now=NOW)
+    assert len(candidates) == 1
+    c = candidates[0]
+    assert (c.kind, c.name, c.category, c.reason) == ("job", "stuck-job", "stuck", "ImagePullBackOff")
+
+
+def test_find_orphaned_resources_is_non_lossy_wrapper_over_candidates():
+    pods = [
+        fake_pod("terminal-pod", phase="Succeeded", container_statuses=finished(600)),
+        fake_pod("stuck-pod", phase="Pending", container_statuses=waiting("ImagePullBackOff"), creation_offset=600),
+    ]
+    jobs = [
+        fake_job("terminal-job", conditions=[condition("Complete", last_transition_time=NOW - timedelta(seconds=600))])
+    ]
+    session = make_session(pods=pods, jobs=jobs)
+    candidates = orphans.find_orphan_candidates(session, CREATED_BY, 300, now=NOW)
+    pairs = orphans.find_orphaned_resources(session, CREATED_BY, 300, now=NOW)
+    assert pairs == [(c.kind, c.name) for c in candidates]
+
+
+# --- clean_orphans ---
+
+
+def test_clean_dry_run_lists_but_deletes_nothing():
+    pods = [fake_pod("p", phase="Succeeded", container_statuses=finished(600))]
+    session = make_session(pods=pods)
+    result = orphans.clean_orphans(session, 300, dry_run=True, now=NOW)
+    assert len(result.candidates) == 1
+    assert result.deleted == result.already_gone == result.failed == []
+    session.core.delete_namespaced_pod.assert_not_called()
+    session.batch.delete_namespaced_job.assert_not_called()
+
+
+def test_clean_deletes_pod_and_job_with_correct_calls():
+    pods = [fake_pod("p", phase="Succeeded", container_statuses=finished(600))]
+    jobs = [fake_job("j", conditions=[condition("Complete", last_transition_time=NOW - timedelta(seconds=600))])]
+    session = make_session(pods=pods, jobs=jobs)
+    result = orphans.clean_orphans(session, 300, now=NOW)
+    assert len(result.deleted) == 2
+    session.core.delete_namespaced_pod.assert_called_once_with("p", "default")
+    args, kwargs = session.batch.delete_namespaced_job.call_args
+    assert args == ("j", "default")
+    assert kwargs["body"].propagation_policy == "Background"
+
+
+def test_clean_404_counts_as_already_gone():
+    pods = [fake_pod("p", phase="Succeeded", container_statuses=finished(600))]
+    session = make_session(pods=pods)
+    session.core.delete_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+    result = orphans.clean_orphans(session, 300, now=NOW)
+    assert result.deleted == []
+    assert result.failed == []
+    assert [c.name for c in result.already_gone] == ["p"]
+
+
+def test_clean_one_delete_failure_does_not_abort_the_rest():
+    pods = [
+        fake_pod("p1", phase="Succeeded", container_statuses=finished(600)),
+        fake_pod("p2", phase="Succeeded", container_statuses=finished(600)),
+    ]
+    session = make_session(pods=pods)
+    session.core.delete_namespaced_pod.side_effect = [
+        ApiException(status=500, reason="Server Error"),
+        None,
+    ]
+    result = orphans.clean_orphans(session, 300, now=NOW)
+    assert session.core.delete_namespaced_pod.call_count == 2
+    assert [c.name for c, _err in result.failed] == ["p1"]
+    assert [c.name for c in result.deleted] == ["p2"]
+
+
+def test_clean_list_failure_hint_does_not_mention_orphan_sweep():
+    session = make_session()
+    session.core.list_namespaced_pod.side_effect = ApiException(status=403, reason="Forbidden")
+    with pytest.raises(ApiError, match="list") as excinfo:
+        orphans.clean_orphans(session, 300, now=NOW)
+    assert "orphan_sweep" not in str(excinfo.value)
+
+
+def test_clean_scoped_to_own_resources_and_selector_wording():
+    pods = [fake_pod("someone-elses", phase="Succeeded", created_by="alex", container_statuses=finished(600))]
+    session = make_session(pods=pods)
+    result = orphans.clean_orphans(session, 300, now=NOW)
+    assert result.candidates == []
+    selector = session.core.list_namespaced_pod.call_args.kwargs["label_selector"]
+    assert f"squarepeg.io/created-by={CREATED_BY}" in selector
+
+
+def test_clean_never_touches_kept_resources_even_at_zero_min_age():
+    pods = [fake_pod("kept", phase="Succeeded", keep=True, container_statuses=finished(0))]
+    session = make_session(pods=pods)
+    result = orphans.clean_orphans(session, 0, now=NOW)
+    assert result.candidates == []
+
+
+def test_clean_never_touches_running_or_benign_pending():
+    pods = [
+        fake_pod("running", phase="Running", creation_offset=100000),
+        fake_pod(
+            "benign-pending", phase="Pending", container_statuses=waiting("ContainerCreating"), creation_offset=100000
+        ),
+    ]
+    session = make_session(pods=pods)
+    result = orphans.clean_orphans(session, 0, now=NOW)
+    assert result.candidates == []
+
+
+def test_clean_does_not_exclude_any_run_id():
+    pods = [fake_pod("mine", phase="Succeeded", run_id="whatever", container_statuses=finished(0))]
+    session = make_session(pods=pods)
+    result = orphans.clean_orphans(session, 0, now=NOW)
+    assert [c.name for c in result.candidates] == ["mine"]
+
+
+def test_clean_output_deleted_line_and_quiet_suppression(capsys):
+    pods = [fake_pod("p", phase="Succeeded", container_statuses=finished(600))]
+    session = make_session(pods=pods)
+    orphans.clean_orphans(session, 300, now=NOW)
+    err = capsys.readouterr().err
+    assert "deleted pod 'p'" in err
+    assert "cleaned 1 of 1" in err
+
+    session2 = make_session(pods=pods)
+    orphans.clean_orphans(session2, 300, quiet=True, now=NOW)
+    assert capsys.readouterr().err == ""

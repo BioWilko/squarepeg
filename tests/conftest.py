@@ -82,3 +82,20 @@ def run_cli(test_namespace, tmp_path):
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
 
     return _run
+
+
+@pytest.fixture
+def clean_cli(test_namespace):
+    """Invoke `squarepeg clean` as a subprocess, isolated from any local config. Sibling to
+    run_cli rather than a generalisation of it, so existing run_cli(*args) call sites (which
+    assume 'run' is prepended) don't need to change."""
+
+    def _clean(*args, timeout=120, env_overrides=None):
+        env = dict(os.environ)
+        env["SQUAREPEG_CONFIG"] = ""
+        cmd = [sys.executable, "-m", "squarepeg", "clean", "--no-default-config", "-n", test_namespace, *args]
+        if env_overrides:
+            env.update(env_overrides)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+
+    return _clean
