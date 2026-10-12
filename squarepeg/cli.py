@@ -24,7 +24,7 @@ from squarepeg.labels import RUN_ID_LABEL
 from squarepeg.log import chatter
 from squarepeg.manifest import build_job, build_pod
 from squarepeg.naming import generate_name, validate_rfc1123
-from squarepeg.quantities import docker_cpus_to_k8s, docker_memory_to_k8s
+from squarepeg.quantities import docker_cpus_to_k8s, docker_gpus_to_k8s, docker_memory_to_k8s
 from squarepeg.runspec import ResourceSpec, RunSpec
 from squarepeg.volumes import auto_mounts_from_config, parse_volume_flag
 
@@ -65,7 +65,6 @@ def _unsupported_callback(ctx, param, value):
 _UNSUPPORTED_GROUPS: list[tuple[list[str], bool]] = [
     (["--network"], False),
     (["--privileged"], True),
-    (["--gpus"], False),
     (["-p", "--publish"], False),
     (["-d", "--detach"], True),
     (["--restart"], False),
@@ -155,6 +154,7 @@ def cli():
 )
 @click.option("--cpus", "cpus", default=None)
 @click.option("-m", "--memory", "memory", default=None)
+@click.option("--gpus", "gpus", default=None, help="GPU count (sets both request and limit)")
 @click.option("--request-cpu", "request_cpu", default=None)
 @click.option("--limit-cpu", "limit_cpu", default=None)
 @click.option("--request-memory", "request_memory", default=None)
@@ -199,6 +199,7 @@ def run(
     pull,
     cpus,
     memory,
+    gpus,
     request_cpu,
     limit_cpu,
     request_memory,
@@ -300,6 +301,22 @@ def run(
         )
     if cli_set_memory and limit_memory is None:
         claims.add(f"/spec/containers/[name={container_name}]/resources/limits/memory")
+
+    if "gpu_resource" in config_defaults:
+        resources.gpu_resource = str(config_defaults["gpu_resource"])
+    if "gpu_runtime_class" in config_defaults:
+        # null/"" disables it, for clusters where the NVIDIA runtime is the node default
+        resources.gpu_runtime_class = config_defaults["gpu_runtime_class"] or None
+    cli_set_gpus = gpus is not None
+    if gpus is None and "gpus" in config_defaults:
+        gpus = config_defaults["gpus"]
+    if gpus is not None:
+        resources.gpus = docker_gpus_to_k8s(gpus)
+    if cli_set_gpus:
+        for kind in ("requests", "limits"):
+            claims.add(
+                f"/spec/containers/[name={container_name}]/resources/{kind}/{resources.gpu_resource}"
+            )
 
     if name is not None:
         validate_rfc1123(name, what="--name")

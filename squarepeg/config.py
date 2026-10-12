@@ -40,7 +40,16 @@ ALLOWED_TOP_KEYS = {
     "job",
     "profiles",
 }
-ALLOWED_DEFAULTS_KEYS = {"cpus", "memory", "image_pull_policy", "workdir", "env"}
+ALLOWED_DEFAULTS_KEYS = {
+    "cpus",
+    "memory",
+    "gpus",
+    "gpu_resource",
+    "gpu_runtime_class",
+    "image_pull_policy",
+    "workdir",
+    "env",
+}
 
 
 def _resolve_env_paths() -> list[tuple[Path, str]]:

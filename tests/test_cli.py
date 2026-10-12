@@ -209,6 +209,55 @@ def test_run_negative_orphan_sweep_min_age_rejected(tmp_path):
     assert "orphan_sweep_min_age" in str(result.exception)
 
 
+def _dry_run_resources(*args):
+    result = _separated_runner().invoke(cli, ["run", "--no-default-config", *args, "--dry-run", "alpine"])
+    assert result.exit_code == 0, result.output
+    return yaml.safe_load(result.stdout)["spec"]["containers"][0]["resources"]
+
+
+def test_run_dry_run_gpus_flag_sets_request_and_limit():
+    resources = _dry_run_resources("--gpus", "2")
+    assert resources["requests"]["nvidia.com/gpu"] == 2
+    assert resources["limits"]["nvidia.com/gpu"] == 2
+
+
+def test_run_dry_run_gpus_from_config_defaults_with_custom_resource(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("defaults:\n  gpus: 1\n  gpu_resource: amd.com/gpu\n")
+    resources = _dry_run_resources("--config", str(config_file))
+    assert resources == {"requests": {"amd.com/gpu": 1}, "limits": {"amd.com/gpu": 1}}
+
+
+def test_run_dry_run_gpu_runtime_class_from_config(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("defaults:\n  gpu_runtime_class: nvidia-cdi\n")
+    args = ["run", "--no-default-config", "--config", str(config_file), "--gpus", "1", "--dry-run", "alpine"]
+    result = _separated_runner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load(result.stdout)["spec"]["runtimeClassName"] == "nvidia-cdi"
+
+    config_file.write_text("defaults:\n  gpu_runtime_class: null\n")
+    result = _separated_runner().invoke(cli, args)
+    assert result.exit_code == 0, result.output
+    assert "runtimeClassName" not in yaml.safe_load(result.stdout)["spec"]
+
+
+def test_run_dry_run_gpus_flag_beats_passthrough(tmp_path):
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(
+        "kubernetes:\n  spec:\n    containers:\n"
+        "      - name: main\n        resources: {limits: {nvidia.com/gpu: 4}}\n"
+    )
+    resources = _dry_run_resources("--config", str(config_file), "--gpus", "1")
+    assert resources["limits"]["nvidia.com/gpu"] == 1
+
+
+def test_run_gpus_all_rejected():
+    result = CliRunner().invoke(cli, ["run", "--no-default-config", "--gpus", "all", "--dry-run", "alpine"])
+    assert result.exit_code != 0
+    assert "explicit GPU count" in str(result.exception) + result.output
+
+
 # --- --dry-run-server ---
 
 

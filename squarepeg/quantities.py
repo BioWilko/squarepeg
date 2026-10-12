@@ -56,3 +56,19 @@ def docker_cpus_to_k8s(value: str) -> str:
         return str(int(cpus))
     millicores = math.ceil(cpus * 1000)
     return f"{millicores}m"
+
+
+def docker_gpus_to_k8s(value: str | int) -> int:
+    """Convert a docker-style --gpus value ('2' or 'count=2') to a k8s GPU count.
+
+    Docker's 'all' and 'device=...' have no k8s equivalent: the scheduler needs an
+    explicit count, and picks the devices itself.
+    """
+    text = str(value).strip()
+    if text.lower().startswith("count="):
+        text = text[len("count="):]
+    if not text.isdigit():
+        raise UsageError(
+            f"invalid gpus value {value!r}: Kubernetes needs an explicit GPU count; pass --gpus N"
+        )
+    return int(text)

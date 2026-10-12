@@ -100,6 +100,43 @@ def test_pod_resources_block_from_resource_spec():
     }
 
 
+def test_pod_gpus_set_both_request_and_limit():
+    resources = ResourceSpec(request_cpu="2", limit_cpu="2", gpus=1)
+    pod = build_pod(basic_spec(resources=resources), run_id=RUN_ID)
+    assert pod["spec"]["containers"][0]["resources"] == {
+        "requests": {"cpu": "2", "nvidia.com/gpu": 1},
+        "limits": {"cpu": "2", "nvidia.com/gpu": 1},
+    }
+    assert pod["spec"]["runtimeClassName"] == "nvidia"
+
+
+def test_pod_no_runtime_class_without_gpus():
+    for resources in (ResourceSpec(), ResourceSpec(gpus=0)):
+        pod = build_pod(basic_spec(resources=resources), run_id=RUN_ID)
+        assert "runtimeClassName" not in pod["spec"]
+
+
+def test_pod_runtime_class_configurable_and_disableable():
+    pod = build_pod(basic_spec(resources=ResourceSpec(gpus=1, gpu_runtime_class="nvidia-cdi")), run_id=RUN_ID)
+    assert pod["spec"]["runtimeClassName"] == "nvidia-cdi"
+    pod = build_pod(basic_spec(resources=ResourceSpec(gpus=1, gpu_runtime_class=None)), run_id=RUN_ID)
+    assert "runtimeClassName" not in pod["spec"]
+
+
+def test_job_template_gets_gpu_runtime_class():
+    job = build_job(basic_spec(mode="job", resources=ResourceSpec(gpus=1)), run_id=RUN_ID)
+    assert job["spec"]["template"]["spec"]["runtimeClassName"] == "nvidia"
+
+
+def test_pod_gpus_use_configured_resource_name():
+    resources = ResourceSpec(gpus=2, gpu_resource="amd.com/gpu")
+    pod = build_pod(basic_spec(resources=resources), run_id=RUN_ID)
+    assert pod["spec"]["containers"][0]["resources"] == {
+        "requests": {"amd.com/gpu": 2},
+        "limits": {"amd.com/gpu": 2},
+    }
+
+
 def test_pod_no_resources_block_when_unset():
     pod = build_pod(basic_spec(), run_id=RUN_ID)
     assert "resources" not in pod["spec"]["containers"][0]

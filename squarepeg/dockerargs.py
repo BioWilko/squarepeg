@@ -7,8 +7,6 @@ UNSUPPORTED: dict[str, str] = {
     "--network": "container networking is a cluster-level concept; use the 'kubernetes' passthrough "
     "section in your config (spec.dnsPolicy, spec.hostNetwork, etc.) if you need to control it",
     "--privileged": "use 'kubernetes.spec.containers[].securityContext.privileged' in your config",
-    "--gpus": "request GPUs via 'kubernetes.spec.containers[].resources' (e.g. 'nvidia.com/gpu: 1') "
-    "in your config",
     "-p": "there is no host to publish a port to on a remote cluster; use a Kubernetes Service instead",
     "--publish": "there is no host to publish a port to on a remote cluster; use a Kubernetes Service instead",
     "-d": "squarepeg always attaches to stream output; there is no detached mode",
