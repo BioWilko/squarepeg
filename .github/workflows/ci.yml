@@ -41,6 +41,12 @@ jobs:
         with:
           cluster_name: kind
       - run: pip install ".[dev]"
-      - run: docker pull busybox:1.36 && kind load docker-image busybox:1.36 --name kind
+      # single-platform archive rather than `kind load docker-image`: with docker's containerd image store
+      # the export keeps the full multi-arch index but only the pulled platform's blobs, so kind's
+      # `ctr import --all-platforms` fails with "content digest ...: not found"
+      - run: |
+          docker pull --platform linux/amd64 busybox:1.36
+          docker save --platform linux/amd64 busybox:1.36 -o "$RUNNER_TEMP/busybox.tar"
+          kind load image-archive "$RUNNER_TEMP/busybox.tar" --name kind
       - run: SQUAREPEG_INTEGRATION=1 pytest -m integration
         timeout-minutes: 5
