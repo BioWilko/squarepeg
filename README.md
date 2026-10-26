@@ -35,6 +35,9 @@ Full documentation lives in the [wiki](https://github.com/BioWilko/squarepeg/wik
 - [Troubleshooting](https://github.com/BioWilko/squarepeg/wiki/Troubleshooting)
 - [Development](https://github.com/BioWilko/squarepeg/wiki/Development)
 
+> **MicroK8s on Python 3.13+:** if connecting fails with `CA cert does not include key usage extension`,
+> set `lenient_tls: true` in your config — see [Troubleshooting](https://github.com/BioWilko/squarepeg/wiki/Troubleshooting#runner-errors-exit-code-125).
+
 See also [`examples/config.yaml`](examples/config.yaml) for a fully worked
 config file.
 

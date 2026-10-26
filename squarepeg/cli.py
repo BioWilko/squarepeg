@@ -354,6 +354,7 @@ def run(
         else coerce_int(resolved_config.get("timeout", 300), "timeout")
     )
     quiet = quiet or coerce_bool(resolved_config.get("quiet", False), "quiet")
+    lenient_tls = coerce_bool(resolved_config.get("lenient_tls", False), "lenient_tls")
     cleanup = (
         False if keep else coerce_bool(resolved_config.get("cleanup", True), "cleanup")
     )
@@ -435,7 +436,7 @@ def run(
         ui.set_run_tag(effective_run_id)
 
     if dry_run_server:
-        session = Session(namespace=spec.namespace, context=context, quiet=spec.quiet)
+        session = Session(namespace=spec.namespace, context=context, quiet=spec.quiet, lenient_tls=lenient_tls)
         spec.namespace = session.namespace
         validated = server_dry_run(session, spec, manifest)
         click.echo(yaml.safe_dump(validated, sort_keys=False), nl=False)
@@ -444,7 +445,7 @@ def run(
         click.echo(yaml.safe_dump(manifest, sort_keys=False), nl=False)
         return
 
-    session = Session(namespace=spec.namespace, context=context, quiet=spec.quiet)
+    session = Session(namespace=spec.namespace, context=context, quiet=spec.quiet, lenient_tls=lenient_tls)
     spec.namespace = session.namespace
     exit_code = run_manifest(session, spec, manifest)
     raise SystemExit(exit_code)
@@ -510,6 +511,7 @@ def clean(dry_run, min_age, namespace, context, quiet, no_color, config_paths, n
     if namespace is None:
         namespace = resolved_config.get("namespace")
     quiet = quiet or coerce_bool(resolved_config.get("quiet", False), "quiet")
+    lenient_tls = coerce_bool(resolved_config.get("lenient_tls", False), "lenient_tls")
 
     if min_age is None:
         min_age = coerce_int(
@@ -520,7 +522,7 @@ def clean(dry_run, min_age, namespace, context, quiet, no_color, config_paths, n
     elif min_age < 0:
         raise UsageError(f"--min-age must not be negative, got {min_age}")
 
-    session = Session(namespace=namespace, context=context, quiet=quiet)
+    session = Session(namespace=namespace, context=context, quiet=quiet, lenient_tls=lenient_tls)
 
     with ui.Status("scanning for orphaned resources", quiet=quiet):
         result = clean_orphans(session, min_age, quiet=quiet, dry_run=dry_run)

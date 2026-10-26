@@ -1,3 +1,4 @@
+import ssl
 from unittest.mock import MagicMock
 
 import pytest
@@ -119,3 +120,26 @@ def test_explicit_context_failure_does_not_fall_back_to_incluster(monkeypatch):
         session_module.Session(context="myctx", quiet=True)
 
     incluster.assert_not_called()
+
+
+def _pool_kw(api):
+    return api.api_client.rest_client.pool_manager.connection_pool_kw
+
+
+def test_default_session_injects_no_ssl_context(monkeypatch):
+    monkeypatch.setattr(session_module.kube_config, "load_kube_config", MagicMock())
+    monkeypatch.setattr(session_module.kube_config, "list_kube_config_contexts", MagicMock(return_value=_ctx()))
+    s = session_module.Session(quiet=True)
+    assert "ssl_context" not in _pool_kw(s.core)
+    assert "ssl_context" not in _pool_kw(s.batch)
+
+
+def test_lenient_tls_clears_only_x509_strict(monkeypatch):
+    monkeypatch.setattr(session_module.kube_config, "load_kube_config", MagicMock())
+    monkeypatch.setattr(session_module.kube_config, "list_kube_config_contexts", MagicMock(return_value=_ctx()))
+    s = session_module.Session(quiet=True, lenient_tls=True)
+    assert s.core.api_client is s.batch.api_client
+    ctx = _pool_kw(s.core)["ssl_context"]
+    assert not ctx.verify_flags & ssl.VERIFY_X509_STRICT
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True

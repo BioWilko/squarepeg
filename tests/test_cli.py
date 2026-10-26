@@ -26,10 +26,11 @@ class FakeSession:
     .core/.batch are plain MagicMocks returning empty lists by default, for 'clean' tests
     that need a listable (but otherwise inert) session."""
 
-    def __init__(self, namespace=None, context=None, quiet=False):
+    def __init__(self, namespace=None, context=None, quiet=False, lenient_tls=False):
         self.namespace = namespace or "default"
         self.context = context
         self.quiet = quiet
+        self.lenient_tls = lenient_tls
         self.context_name = context or "fake-context"
         self.core = MagicMock()
         self.batch = MagicMock()
@@ -318,11 +319,12 @@ def test_dry_run_server_constructs_session_with_context_and_quiet(monkeypatch):
     constructed = {}
 
     class RecordingFakeSession(FakeSession):
-        def __init__(self, namespace=None, context=None, quiet=False):
+        def __init__(self, namespace=None, context=None, quiet=False, lenient_tls=False):
             constructed["namespace"] = namespace
             constructed["context"] = context
             constructed["quiet"] = quiet
-            super().__init__(namespace=namespace, context=context, quiet=quiet)
+            constructed["lenient_tls"] = lenient_tls
+            super().__init__(namespace=namespace, context=context, quiet=quiet, lenient_tls=lenient_tls)
 
     monkeypatch.setattr(cli_module, "Session", RecordingFakeSession)
     monkeypatch.setattr(cli_module, "server_dry_run", lambda session, spec, manifest: manifest)
@@ -333,6 +335,27 @@ def test_dry_run_server_constructs_session_with_context_and_quiet(monkeypatch):
     assert result.exit_code == 0, result.output
     assert constructed["context"] == "my-context"
     assert constructed["quiet"] is True
+    assert constructed["lenient_tls"] is False
+
+
+def test_dry_run_server_lenient_tls_from_config(monkeypatch, tmp_path):
+    constructed = {}
+
+    class RecordingFakeSession(FakeSession):
+        def __init__(self, namespace=None, context=None, quiet=False, lenient_tls=False):
+            constructed["lenient_tls"] = lenient_tls
+            super().__init__(namespace=namespace, context=context, quiet=quiet, lenient_tls=lenient_tls)
+
+    monkeypatch.setattr(cli_module, "Session", RecordingFakeSession)
+    monkeypatch.setattr(cli_module, "server_dry_run", lambda session, spec, manifest: manifest)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text("lenient_tls: true\n")
+
+    result = CliRunner().invoke(
+        cli, ["run", "--no-default-config", "--config", str(config_file), "--dry-run-server", "alpine"]
+    )
+    assert result.exit_code == 0, result.output
+    assert constructed["lenient_tls"] is True
 
 
 def test_dry_run_server_apiserver_rejection_exits_125(monkeypatch):
@@ -354,7 +377,7 @@ def test_dry_run_server_apiserver_rejection_exits_125(monkeypatch):
 
 
 def test_dry_run_server_no_cluster_connection_exits_125(monkeypatch):
-    def raising_session(namespace=None, context=None, quiet=False):
+    def raising_session(namespace=None, context=None, quiet=False, lenient_tls=False):
         raise RunnerError("could not load a kubeconfig (...) and doesn't look like it's running in-cluster (...)")
 
     monkeypatch.setattr(cli_module, "Session", raising_session)
@@ -554,8 +577,8 @@ def _mock_clean_session(monkeypatch, pods=(), jobs=()):
     monkeypatch.setattr("squarepeg.k8s.orphans.current_created_by", lambda: CLEAN_CREATED_BY)
 
     class RecordingFakeSession(FakeSession):
-        def __init__(self, namespace=None, context=None, quiet=False):
-            super().__init__(namespace=namespace, context=context, quiet=quiet)
+        def __init__(self, namespace=None, context=None, quiet=False, lenient_tls=False):
+            super().__init__(namespace=namespace, context=context, quiet=quiet, lenient_tls=lenient_tls)
             self.core.list_namespaced_pod.return_value = SimpleNamespace(items=list(pods))
             self.batch.list_namespaced_job.return_value = SimpleNamespace(items=list(jobs))
 
@@ -597,8 +620,8 @@ def test_clean_partial_failure_exit_code(monkeypatch):
     monkeypatch.setattr("squarepeg.k8s.orphans.current_created_by", lambda: CLEAN_CREATED_BY)
 
     class FailingFakeSession(FakeSession):
-        def __init__(self, namespace=None, context=None, quiet=False):
-            super().__init__(namespace=namespace, context=context, quiet=quiet)
+        def __init__(self, namespace=None, context=None, quiet=False, lenient_tls=False):
+            super().__init__(namespace=namespace, context=context, quiet=quiet, lenient_tls=lenient_tls)
             self.core.list_namespaced_pod.return_value = SimpleNamespace(items=[_clean_pod("p1"), _clean_pod("p2")])
             self.core.delete_namespaced_pod.side_effect = [ApiException(status=500, reason="err"), None]
 
@@ -613,8 +636,8 @@ def test_clean_listing_failure_exits_125(monkeypatch):
     monkeypatch.setattr("squarepeg.k8s.orphans.current_created_by", lambda: CLEAN_CREATED_BY)
 
     class RaisingFakeSession(FakeSession):
-        def __init__(self, namespace=None, context=None, quiet=False):
-            super().__init__(namespace=namespace, context=context, quiet=quiet)
+        def __init__(self, namespace=None, context=None, quiet=False, lenient_tls=False):
+            super().__init__(namespace=namespace, context=context, quiet=quiet, lenient_tls=lenient_tls)
             self.core.list_namespaced_pod.side_effect = ApiException(status=403, reason="Forbidden")
 
     monkeypatch.setattr(cli_module, "Session", RaisingFakeSession)
@@ -628,10 +651,10 @@ def test_clean_namespace_and_context_forwarded_to_session(monkeypatch):
     monkeypatch.setattr("squarepeg.k8s.orphans.current_created_by", lambda: CLEAN_CREATED_BY)
 
     class RecordingFakeSession(FakeSession):
-        def __init__(self, namespace=None, context=None, quiet=False):
+        def __init__(self, namespace=None, context=None, quiet=False, lenient_tls=False):
             constructed["namespace"] = namespace
             constructed["context"] = context
-            super().__init__(namespace=namespace, context=context, quiet=quiet)
+            super().__init__(namespace=namespace, context=context, quiet=quiet, lenient_tls=lenient_tls)
 
     monkeypatch.setattr(cli_module, "Session", RecordingFakeSession)
     result = _separated_runner().invoke(

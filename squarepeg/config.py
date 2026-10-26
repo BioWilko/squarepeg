@@ -31,6 +31,7 @@ ALLOWED_TOP_KEYS = {
     "timeout",
     "quiet",
     "allow_host_path_mounts",
+    "lenient_tls",
     "split_streams",
     "orphan_sweep",
     "orphan_sweep_min_age",

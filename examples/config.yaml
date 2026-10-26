@@ -24,6 +24,8 @@ cleanup: true                # false behaves as if --keep were always passed
 timeout: 300                 # seconds to wait for the container to start
 quiet: false
 allow_host_path_mounts: false
+lenient_tls: false           # true relaxes strict X.509 checks for CAs lacking keyUsage (e.g. MicroK8s,
+                              # canonical/microk8s#4864) -- certificates are still verified
 split_streams: false
 orphan_sweep: true           # also delete YOUR OWN leftovers from crashed previous runs
                               # (finished-but-undeleted, or stuck forever on a bad image)

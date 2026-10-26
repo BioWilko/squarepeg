@@ -1,8 +1,10 @@
+import ssl
 from pathlib import Path
 
 from kubernetes import client
 from kubernetes import config as kube_config
 from kubernetes.config.config_exception import ConfigException
+from urllib3.util.ssl_ import create_urllib3_context
 
 from squarepeg.errors import RunnerError
 from squarepeg.log import chatter
@@ -47,7 +49,13 @@ class Session:
     surface that failure, not be silently masked by an in-cluster fallback.
     """
 
-    def __init__(self, namespace: str | None = None, context: str | None = None, quiet: bool = False):
+    def __init__(
+        self,
+        namespace: str | None = None,
+        context: str | None = None,
+        quiet: bool = False,
+        lenient_tls: bool = False,
+    ):
         in_cluster = False
         try:
             kube_config.load_kube_config(context=context)
@@ -73,7 +81,19 @@ class Session:
 
         self.namespace = namespace or context_namespace or "default"
 
-        self.core = client.CoreV1Api()
-        self.batch = client.BatchV1Api()
+        api_client = None
+        if lenient_tls:
+            # short-term workaround for https://github.com/canonical/microk8s/issues/4864: microk8s's CA
+            # lacks the keyUsage extension, which Python 3.13+/urllib3 2.3+ reject via VERIFY_X509_STRICT.
+            # Only that flag is cleared -- CERT_REQUIRED, CA chain and hostname checks are all still
+            # enforced. The kubernetes client exposes no ssl_context option, so it's injected into the
+            # (lazily created) urllib3 connection pools' kwargs instead.
+            ssl_context = create_urllib3_context()
+            ssl_context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+            api_client = client.ApiClient()
+            api_client.rest_client.pool_manager.connection_pool_kw["ssl_context"] = ssl_context
+
+        self.core = client.CoreV1Api(api_client)
+        self.batch = client.BatchV1Api(api_client)
 
         chatter(f"using context {self.context_name!r}, namespace {self.namespace!r}", quiet=quiet)
